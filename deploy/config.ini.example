@@ -1,0 +1,10 @@
+# /etc/plex-renamer/config.ini
+
+[general]
+# Comma-separated. Browsing is confined to these; nothing outside is reachable.
+roots    = /mnt/bama/volume1/TV Shows, /mnt/pippa/volume1/Videos/KIKU
+undo_dir = /var/lib/plex-renamer/undo
+
+[server]
+bind_host = 0.0.0.0
+bind_port = 8101

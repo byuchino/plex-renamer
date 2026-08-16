@@ -236,6 +236,31 @@ def assign_episodes(files: Sequence[Path], anchors: Dict[str, int],
     return out
 
 
+def check_override(name: str, original_suffix: str) -> List[str]:
+    """What is wrong with a hand-typed filename, if anything.
+
+    The page lets a row's proposed name be edited directly, so these strings
+    arrive from a browser and are used to build a destination path. A name
+    containing a separator would silently write outside the season folder,
+    which is the one thing root confinement cannot catch — the path would be
+    built from a trusted parent and an untrusted leaf.
+    """
+    issues: List[str] = []
+    stripped = name.strip()
+    if not stripped:
+        issues.append("Name is empty.")
+        return issues
+    if "/" in name or "\\" in name or "\0" in name:
+        issues.append("Name cannot contain a path separator.")
+    if stripped in (".", ".."):
+        issues.append("Name is not a filename.")
+    if Path(stripped).suffix.lower() != original_suffix.lower():
+        # Changing .mp4 to .mkv renames the container without converting it,
+        # leaving a file that lies about its own format to Plex.
+        issues.append("Extension must stay {}.".format(original_suffix))
+    return issues
+
+
 def build_plan(season_dir: Path,
                entries: Sequence[Path],
                show_name: str,
@@ -245,9 +270,16 @@ def build_plan(season_dir: Path,
                ident_source: str = DEFAULT_ID_SOURCE,
                anchors: Optional[Dict[str, int]] = None,
                per_episode: int = 1,
-               rename_show_dir: bool = False) -> Plan:
+               rename_show_dir: bool = False,
+               name_overrides: Optional[Dict[str, str]] = None) -> Plan:
     """The whole proposal, as data. Reads nothing from disk except the listing
-    it is given, so it is fully testable without a media library."""
+    it is given, so it is fully testable without a media library.
+
+    name_overrides maps a source filename to a hand-typed target name, for the
+    rows the user edited directly. Overridden rows are validated and collision
+    checked exactly like derived ones — the override changes what the name is,
+    never whether it is checked.
+    """
     plan = Plan()
     files, plan.skipped = collect_files(entries)
 
@@ -267,11 +299,21 @@ def build_plan(season_dir: Path,
     if not files:
         plan.issues.append("No files with a Plex fallback timecode in this folder.")
 
+    overrides = name_overrides or {}
     dest_dir = plan.season_dir_target
     for path, episode in zip(files, assign_episodes(files, anchors or {}, per_episode)):
         tc = timecode_of(path) or ""
         name = build_target_name(show_name, year, season, episode, tc, path.suffix)
+        override_issues: List[str] = []
+        if path.name in overrides:
+            typed = overrides[path.name]
+            override_issues = check_override(typed, path.suffix)
+            # Keep the derived name when the typed one is unusable, so the row
+            # still shows a sane target next to the reason it was rejected.
+            if not override_issues:
+                name = typed.strip()
         pf = PlannedFile(source=path, episode=episode, target=dest_dir / name)
+        pf.issues.extend(override_issues)
         if episode < 1:
             pf.issues.append("Episode must be 1 or greater.")
         plan.files.append(pf)

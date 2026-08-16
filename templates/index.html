@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plex Renamer</title>
+<style>
+  :root {
+    --bg: #14161c; --panel: #1c1f27; --border: #2a2e3a;
+    --text: #e6e8ee; --muted: #8b93a7;
+    --accent: #3b82f6; --ok: #22c55e; --bad: #ef4444; --warn: #f59e0b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin-bottom: 20px; font-size: 12px; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 16px; overflow: hidden; }
+  section h2 { font-size: 13px; margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .pad { padding: 12px 14px; }
+  .empty { padding: 16px 14px; color: var(--muted); font-style: italic; }
+  code, .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+
+  /* Browser */
+  .crumbs { padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; word-break: break-all; }
+  .dirlist { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
+  .dir {
+    background: #11131a; border: 1px solid var(--border); color: var(--text);
+    padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  .dir:hover { border-color: var(--accent); }
+  .dir .count { color: var(--muted); font-size: 11px; margin-left: 6px; }
+
+  /* Form */
+  .form { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; padding: 12px 14px; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  input[type=text], input[type=number] {
+    background: #11131a; border: 1px solid var(--border); color: var(--text);
+    padding: 6px 10px; border-radius: 6px; font-size: 13px; width: 100%;
+  }
+  input:focus { outline: 1px solid var(--accent); }
+  .radios { display: flex; gap: 10px; align-items: center; height: 31px; font-size: 13px; }
+  .radios label { text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--text); display: flex; gap: 4px; align-items: center; }
+  .checkrow { display: flex; gap: 8px; align-items: center; padding: 0 14px 12px; font-size: 13px; color: var(--muted); }
+
+  /* Table */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
+  tr:last-child td { border-bottom: none; }
+  td.src { color: var(--muted); max-width: 320px; word-break: break-all; }
+  td.arrow { color: var(--muted); }
+  .ep-btn {
+    background: rgba(59,130,246,.15); border: 1px solid transparent; color: var(--accent);
+    padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+  }
+  .ep-btn:hover { border-color: var(--accent); }
+  .ep-btn.anchored { background: rgba(245,158,11,.15); color: var(--warn); }
+  .row-issue { color: var(--bad); font-size: 12px; }
+  tr.edited td.tgt input { border-color: var(--warn); }
+  .clear-edit { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; padding: 0 4px; }
+  .clear-edit:hover { color: var(--text); }
+
+  .note { color: var(--muted); font-size: 12px; }
+  .issue { color: var(--bad); font-size: 13px; }
+  .skip { color: var(--muted); font-size: 12px; word-break: break-all; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .badge.ok { background: rgba(34,197,94,.2); color: var(--ok); }
+  .badge.bad { background: rgba(239,68,68,.2); color: var(--bad); }
+
+  /* Footer / action bar */
+  .actions { display: flex; align-items: center; gap: 12px; padding: 12px 14px; flex-wrap: wrap; }
+  button.primary {
+    background: var(--accent); border: none; color: #fff; padding: 8px 16px;
+    border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  button.primary:disabled { background: #2a2e3a; color: var(--muted); cursor: not-allowed; }
+  button.ghost {
+    background: transparent; border: 1px solid var(--border); color: var(--muted);
+    padding: 8px 12px; border-radius: 6px; font-size: 13px; cursor: pointer;
+  }
+  button.ghost:hover { color: var(--text); border-color: var(--accent); }
+
+  /* Episode matrix */
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 10; display: none; }
+  .overlay.open { display: block; }
+  .modal {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    z-index: 11; width: min(440px, 92vw); display: none;
+  }
+  .modal.open { display: block; }
+  .matrix { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; padding: 12px 14px; }
+  .matrix button {
+    background: #11131a; border: 1px solid var(--border); color: var(--text);
+    padding: 6px 0; border-radius: 6px; cursor: pointer; font-size: 12px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+  }
+  .matrix button:hover { border-color: var(--accent); }
+  .matrix button.current { background: rgba(59,130,246,.2); border-color: var(--accent); color: var(--accent); }
+  .modal .typed { display: flex; gap: 8px; padding: 0 14px 14px; align-items: center; }
+</style>
+</head>
+<body>
+
+<h1>Plex Renamer</h1>
+<div class="sub" id="phase-note">
+  Read-only preview. Nothing on this page can move a file yet — renaming arrives in Phase&nbsp;3.
+</div>
+
+<section>
+  <h2>Folder</h2>
+  <div class="crumbs" id="crumbs">Loading…</div>
+  <div class="dirlist" id="dirlist"></div>
+</section>
+
+<div id="planner" style="display:none">
+  <section>
+    <h2>Naming</h2>
+    <div class="form">
+      <div class="field">
+        <label for="f-show">Show name</label>
+        <input type="text" id="f-show">
+      </div>
+      <div class="field">
+        <label for="f-year">Year</label>
+        <input type="text" id="f-year" placeholder="(none)">
+      </div>
+      <div class="field">
+        <label for="f-id">ID</label>
+        <input type="text" id="f-id" placeholder="(none)">
+      </div>
+      <div class="field">
+        <label>ID source</label>
+        <div class="radios">
+          <label><input type="radio" name="idsrc" value="tmdb"> TMDB</label>
+          <label><input type="radio" name="idsrc" value="tvdb"> TVDB</label>
+        </div>
+      </div>
+      <div class="field">
+        <label for="f-season">Season</label>
+        <input type="number" id="f-season" min="0" step="1">
+      </div>
+      <div class="field">
+        <label for="f-per">Airings per episode</label>
+        <input type="number" id="f-per" min="1" step="1" value="1">
+      </div>
+    </div>
+    <div class="checkrow">
+      <input type="checkbox" id="f-renamedir">
+      <label for="f-renamedir">Also rename the show folder to <span class="mono" id="showdir-preview">—</span></label>
+    </div>
+    <div class="pad note" id="dest-line"></div>
+  </section>
+
+  <section>
+    <h2>Files</h2>
+    <table>
+      <thead>
+        <tr><th style="width:44px">Ep</th><th>Current name</th><th style="width:24px"></th><th>Proposed name</th></tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty" id="rows-empty" style="display:none">No files with a Plex fallback timecode here.</div>
+  </section>
+
+  <section id="notes-section" style="display:none">
+    <h2>Notes</h2>
+    <div class="pad" id="notes"></div>
+  </section>
+
+  <section id="skipped-section" style="display:none">
+    <h2>Skipped</h2>
+    <div class="pad" id="skipped"></div>
+  </section>
+
+  <section>
+    <h2>Summary</h2>
+    <div class="actions">
+      <span id="summary" class="note"></span>
+      <span id="verdict"></span>
+      <span style="flex:1"></span>
+      <button class="ghost" id="reset-btn">Reset edits</button>
+      <button class="primary" id="rename-btn" disabled
+              title="Execution is not implemented yet — Phase 3">Rename…</button>
+    </div>
+    <div class="pad note">Plan fingerprint <span class="mono" id="fingerprint">—</span></div>
+  </section>
+</div>
+
+<div class="overlay" id="overlay"></div>
+<div class="modal" id="modal">
+  <h2 id="modal-title">Episode</h2>
+  <div class="matrix" id="matrix"></div>
+  <div class="typed">
+    <input type="number" id="modal-input" min="1" step="1" placeholder="or type a number">
+    <button class="primary" id="modal-ok">Set</button>
+    <button class="ghost" id="modal-cancel">Cancel</button>
+  </div>
+</div>
+
+<script>
+const state = {
+  path: null,
+  files: [],          // source_name order, as last returned by the server
+  anchors: {},        // source_name -> episode number
+  overrides: {},      // source_name -> hand-typed target name
+  modalFor: null,
+};
+
+function esc(s) {
+  return String(s === null || s === undefined ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function debounce(fn, ms) {
+  let t = null;
+  return function () {
+    const args = arguments;
+    clearTimeout(t);
+    t = setTimeout(function () { fn.apply(null, args); }, ms);
+  };
+}
+
+// ── Browsing ───────────────────────────────────────────────────────────────
+
+// '/#path=<encoded>' opens straight into a folder, so a season is bookmarkable
+// and the page is reachable in one step from a headless browser.
+function hashPath() {
+  const m = /(?:^|&)path=([^&]*)/.exec(location.hash.slice(1));
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+async function browse(path) {
+  const url = path ? "/api/browse?path=" + encodeURIComponent(path) : "/api/browse";
+  const res = await fetch(url);
+  const data = await res.json();
+  if (data.error) { document.getElementById("crumbs").textContent = data.error; return; }
+
+  const crumbs = document.getElementById("crumbs");
+  crumbs.textContent = data.at_top ? "Configured roots" : data.path;
+
+  const list = document.getElementById("dirlist");
+  let html = "";
+  if (data.parent) {
+    html += '<button class="dir" data-path="' + esc(data.parent) + '">↑ up</button>';
+  }
+  data.dirs.forEach(function (d) {
+    html += '<button class="dir" data-path="' + esc(d.path) + '">' + esc(d.name) + "</button>";
+  });
+  if (!data.dirs.length && !data.parent) html = '<span class="note">No roots configured.</span>';
+  list.innerHTML = html;
+  list.querySelectorAll(".dir").forEach(function (b) {
+    b.onclick = function () { open(b.dataset.path); };
+  });
+
+  // A folder holding timecode files is one worth planning; otherwise this is
+  // just a level to navigate through.
+  if (!data.at_top && data.renameable > 0) {
+    state.path = data.path;
+    state.anchors = {};
+    state.overrides = {};
+    document.getElementById("planner").style.display = "";
+    plan({ path: data.path });   // no overrides: server derives every default
+  } else {
+    state.path = null;
+    document.getElementById("planner").style.display = "none";
+  }
+}
+
+function open(path) {
+  const encoded = path ? "#path=" + encodeURIComponent(path) : "#";
+  if (location.hash !== encoded) {
+    location.hash = encoded;   // hashchange drives the browse
+  } else {
+    browse(path);
+  }
+}
+
+window.onhashchange = function () { browse(hashPath()); };
+
+// ── Planning ───────────────────────────────────────────────────────────────
+
+function currentPayload() {
+  return {
+    path: state.path,
+    show_name: document.getElementById("f-show").value,
+    year: document.getElementById("f-year").value,
+    ident: document.getElementById("f-id").value,
+    ident_source: document.querySelector('input[name=idsrc]:checked').value,
+    season: document.getElementById("f-season").value,
+    per_episode: document.getElementById("f-per").value,
+    rename_show_dir: document.getElementById("f-renamedir").checked,
+    anchors: state.anchors,
+    name_overrides: state.overrides,
+  };
+}
+
+async function plan(payload) {
+  const res = await fetch("/api/plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (data.error) {
+    document.getElementById("summary").textContent = data.error;
+    return;
+  }
+  render(data);
+}
+
+const replan = debounce(function () { plan(currentPayload()); }, 250);
+
+function render(data) {
+  // Fill the form from the server's own resolution, so first load and every
+  // later response agree about what the inputs are.
+  document.getElementById("f-show").value = data.inputs.show_name || "";
+  document.getElementById("f-year").value = data.inputs.year || "";
+  document.getElementById("f-id").value = data.inputs.ident || "";
+  document.getElementById("f-season").value = data.inputs.season;
+  document.getElementById("f-per").value = data.inputs.per_episode;
+  document.getElementById("f-renamedir").checked = data.inputs.rename_show_dir;
+  const radio = document.querySelector('input[name=idsrc][value="' + data.inputs.ident_source + '"]');
+  if (radio) radio.checked = true;
+
+  document.getElementById("showdir-preview").textContent =
+    data.show_dir_target ? data.show_dir_target.split("/").pop() : "(unchanged)";
+  document.getElementById("dest-line").innerHTML =
+    "Files move into <span class='mono'>" + esc(data.season_dir_target) + "</span>" +
+    (data.season_dir_was_year
+      ? " &middot; the folder here is a year, so the season was defaulted"
+      : "");
+
+  state.files = data.files.map(function (f) { return f.source_name; });
+
+  const tbody = document.getElementById("rows");
+  tbody.innerHTML = data.files.map(function (f) {
+    const anchored = Object.prototype.hasOwnProperty.call(state.anchors, f.source_name);
+    const edited = Object.prototype.hasOwnProperty.call(state.overrides, f.source_name);
+    return "<tr" + (edited ? ' class="edited"' : "") + ">" +
+      '<td><button class="ep-btn' + (anchored ? " anchored" : "") + '" data-name="' +
+        esc(f.source_name) + '">' + String(f.episode).padStart(2, "0") + "</button></td>" +
+      '<td class="src mono">' + esc(f.source_name) + "</td>" +
+      '<td class="arrow">→</td>' +
+      '<td class="tgt"><input type="text" class="mono" data-name="' + esc(f.source_name) +
+        '" value="' + esc(f.target_name) + '">' +
+        (edited ? '<button class="clear-edit" data-clear="' + esc(f.source_name) +
+                  '" title="Undo this edit">&times;</button>' : "") +
+        f.issues.map(function (i) { return '<div class="row-issue">' + esc(i) + "</div>"; }).join("") +
+      "</td></tr>";
+  }).join("");
+
+  document.getElementById("rows-empty").style.display = data.files.length ? "none" : "";
+
+  tbody.querySelectorAll(".ep-btn").forEach(function (b) {
+    b.onclick = function () { openMatrix(b.dataset.name, parseInt(b.textContent, 10)); };
+  });
+  tbody.querySelectorAll("td.tgt input").forEach(function (inp) {
+    inp.oninput = function () {
+      state.overrides[inp.dataset.name] = inp.value;
+      replan();
+    };
+  });
+  tbody.querySelectorAll(".clear-edit").forEach(function (b) {
+    b.onclick = function () { delete state.overrides[b.dataset.clear]; replan(); };
+  });
+
+  const notes = document.getElementById("notes");
+  notes.innerHTML = data.notes.map(function (n) {
+    return '<div class="note">' + esc(n) + "</div>";
+  }).join("");
+  document.getElementById("notes-section").style.display = data.notes.length ? "" : "none";
+
+  const skipped = document.getElementById("skipped");
+  skipped.innerHTML = data.skipped.map(function (s) {
+    return '<div class="skip mono">' + esc(s.name) + " <span class='note'>(" + esc(s.reason) + ")</span></div>";
+  }).join("");
+  document.getElementById("skipped-section").style.display = data.skipped.length ? "" : "none";
+
+  const issues = data.issues.map(function (i) {
+    return '<div class="issue">' + esc(i) + "</div>";
+  }).join("");
+  document.getElementById("summary").innerHTML =
+    issues + data.move_count + " file(s) would be renamed, " + data.skipped.length + " skipped";
+  document.getElementById("verdict").innerHTML = data.ok
+    ? '<span class="badge ok">plan is valid</span>'
+    : '<span class="badge bad">plan has problems</span>';
+  document.getElementById("fingerprint").textContent = data.fingerprint;
+  // Stays disabled regardless of validity: Phase 2 has no execute endpoint.
+  document.getElementById("rename-btn").disabled = true;
+}
+
+// ── Episode matrix ─────────────────────────────────────────────────────────
+
+function openMatrix(sourceName, current) {
+  state.modalFor = sourceName;
+  document.getElementById("modal-title").textContent = "Episode for " + sourceName;
+  const grid = document.getElementById("matrix");
+  let html = "";
+  for (let i = 1; i <= 40; i++) {
+    html += '<button data-ep="' + i + '"' + (i === current ? ' class="current"' : "") +
+            ">" + String(i).padStart(2, "0") + "</button>";
+  }
+  grid.innerHTML = html;
+  grid.querySelectorAll("button").forEach(function (b) {
+    b.onclick = function () { setEpisode(parseInt(b.dataset.ep, 10)); };
+  });
+  document.getElementById("modal-input").value = current || "";
+  document.getElementById("overlay").classList.add("open");
+  document.getElementById("modal").classList.add("open");
+}
+
+function closeMatrix() {
+  document.getElementById("overlay").classList.remove("open");
+  document.getElementById("modal").classList.remove("open");
+  state.modalFor = null;
+}
+
+function setEpisode(n) {
+  if (!state.modalFor || !(n >= 1)) { closeMatrix(); return; }
+  // Picking a number anchors this row and drops anchors below it, so the pick
+  // cascades forward and earlier rows are left alone (README).
+  const idx = state.files.indexOf(state.modalFor);
+  state.files.slice(idx + 1).forEach(function (name) { delete state.anchors[name]; });
+  state.anchors[state.modalFor] = n;
+  closeMatrix();
+  plan(currentPayload());
+}
+
+// ── Wiring ─────────────────────────────────────────────────────────────────
+
+["f-show", "f-year", "f-id", "f-season", "f-per"].forEach(function (id) {
+  document.getElementById(id).oninput = replan;
+});
+document.querySelectorAll('input[name=idsrc]').forEach(function (r) { r.onchange = replan; });
+document.getElementById("f-renamedir").onchange = replan;
+document.getElementById("reset-btn").onclick = function () {
+  state.anchors = {};
+  state.overrides = {};
+  plan({ path: state.path });
+};
+document.getElementById("modal-ok").onclick = function () {
+  setEpisode(parseInt(document.getElementById("modal-input").value, 10));
+};
+document.getElementById("modal-cancel").onclick = closeMatrix;
+document.getElementById("overlay").onclick = closeMatrix;
+
+browse(hashPath());
+</script>
+</body>
+</html>

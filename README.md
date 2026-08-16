@@ -129,10 +129,20 @@ deploy/        systemd unit, config.ini.example
 Endpoints: `GET /api/browse`, `POST /api/plan` (no writes), `POST /api/execute`,
 `POST /api/undo`.
 
+`POST /api/plan` takes the folder plus any inputs the user has changed. An **absent**
+key means "derive it from the path"; a key present but **empty** means "the user
+cleared it, leave it out" — which is how a show with no year and a show whose year has
+not been typed yet stay distinguishable. The response echoes the inputs it resolved, so
+the form populates itself from the same derivation the plan used rather than a second
+one in JavaScript.
+
+`/#path=<encoded>` opens straight into a folder, which makes a season bookmarkable and
+the page reachable in one step from a headless browser.
+
 ## Build phases
 
-1. **Core + tests + `cli.py --dry-run`.** No write capability exists in the codebase yet.
-2. **Web UI, read-only.** Full page driving `/api/plan`. Can be pointed at the real
+1. ✅ **Core + tests + `cli.py --dry-run`.** No write capability exists in the codebase yet.
+2. ✅ **Web UI, read-only.** Full page driving `/api/plan`. Can be pointed at the real
    library and is incapable of changing it.
 3. **Execute.** `execute.py`, undo manifest, confirmation dialog, plan hash.
 4. **Deploy and prove.** First real run against a scratch copy of one season, then the
@@ -155,6 +165,28 @@ Endpoints: `GET /api/browse`, `POST /api/plan` (no writes), `POST /api/execute`,
 annotations at runtime without `from __future__ import annotations`. Local development
 python is 3.12, so this will not be caught locally — verify against the VM's interpreter.
 
+## Running it locally
+
+```sh
+.venv/bin/python -m pytest tests -q
+PLEX_RENAMER_CONFIG=/path/to/config.ini .venv/bin/python app.py
+```
+
+Flask is started without debug, so **Jinja does not reload a changed template** —
+restart the process after editing `templates/index.html` or you will screenshot the
+previous version and go looking for a bug that is not there.
+
 ## Status
 
-Phase 1 in progress. Nothing deployed.
+**Phases 1 and 2 complete. Nothing deployed, and no code in this repo can move a file.**
+
+The page browses the configured roots, derives all four inputs from the path, live
+re-plans on every edit, groups re-broadcasts via airings-per-episode, cascades an
+episode pick forward, and validates hand-typed names — with the Rename button
+permanently disabled until Phase 3 supplies an endpoint behind it.
+
+Phase 3 is next: `execute.py`, the undo manifest, the confirmation dialog, and the plan
+hash check. That is the first phase that can change a library, so `test_app.py`'s
+`test_no_module_can_mutate_the_filesystem` deliberately pins `app.py`, `core.py` and
+`config.py` as non-mutating — add `execute.py` as the one exception, do not relax the
+rule for the others.

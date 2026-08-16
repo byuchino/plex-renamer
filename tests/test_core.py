@@ -246,3 +246,41 @@ def test_existing_target_detected(tmp_path):
                            year="2026", season=1)
     assert not plan.ok
     assert "already exists" in plan.files[0].issues[0]
+
+
+# ── Hand-typed names ───────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("typed, expected", [
+    ("Fine Name.mp4", []),
+    ("", ["Name is empty."]),
+    ("   ", ["Name is empty."]),
+    ("sub/dir.mp4", ["Name cannot contain a path separator."]),
+    ("..\\up.mp4", ["Name cannot contain a path separator."]),
+    ("Renamed.mkv", ["Extension must stay .mp4."]),
+])
+def test_check_override(typed, expected):
+    assert core.check_override(typed, ".mp4") == expected
+
+
+FIRST = "Nagatan and Aoto (2026) - 2026-06-22 23 00 00.mp4"
+SECOND = "Nagatan and Aoto (2026) - 2026-06-23 17 00 00.mp4"
+
+
+def test_override_replaces_one_row_and_leaves_the_rest_derived():
+    plan = a_plan(name_overrides={FIRST: "Custom.mp4"})
+    assert plan.files[0].target_name == "Custom.mp4"
+    assert plan.files[1].target_name == \
+        "Nagatan and Aoto (2026) - S01E02 - 2026-06-23 17 00 00.mp4"
+    assert plan.ok
+
+
+def test_a_rejected_override_keeps_the_derived_name_and_blocks_the_plan():
+    plan = a_plan(name_overrides={FIRST: "../esc.mp4"})
+    assert plan.files[0].target_name.startswith("Nagatan and Aoto (2026) - S01E01")
+    assert not plan.ok
+
+
+def test_overrides_are_collision_checked_like_derived_names():
+    plan = a_plan(name_overrides={FIRST: "Same.mp4", SECOND: "Same.mp4"})
+    assert not plan.ok
+    assert any("Same target as" in i for i in plan.files[0].issues)

@@ -155,6 +155,8 @@ class Plan:
     season_dir_target: Optional[Path] = None
     show_dir_target: Optional[Path] = None
     issues: List[str] = field(default_factory=list)
+    # Non-blocking observations. Unlike issues, these never prevent a rename.
+    notes: List[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -198,7 +200,8 @@ def build_show_dir_name(show_name: str, year: Optional[str],
     return name
 
 
-def assign_episodes(files: Sequence[Path], anchors: Dict[str, int]) -> List[int]:
+def assign_episodes(files: Sequence[Path], anchors: Dict[str, int],
+                    per_episode: int = 1) -> List[int]:
     """Episode number per file, in order.
 
     Numbering starts at 1 and increments. An anchor (an explicit pick for one
@@ -206,13 +209,30 @@ def assign_episodes(files: Sequence[Path], anchors: Dict[str, int]) -> List[int]
     — which is what makes a single correction cascade forward while leaving
     earlier rows alone. The UI drops anchors on later files when a new pick is
     made, so the visible behaviour is 'edit a row, everything below re-derives'.
+
+    per_episode is how many consecutive files share one episode number before
+    it advances. It exists because most Hawaii series are broadcast twice — the
+    original and a re-broadcast the next day — and Plex records both, so a
+    16-file folder is routinely 8 episodes rather than 16. Setting it to 2
+    produces 1,1,2,2,3,3… and turns eight manual corrections into one control.
+
+    An anchor always starts a fresh group, so an irregular run (a week where
+    the re-broadcast was missed, which does happen) is fixed by anchoring at
+    the point it breaks rather than by correcting every row after it.
     """
+    per_episode = max(1, per_episode)
     out: List[int] = []
-    nxt = 1
+    current = 1
+    used = 0
     for p in files:
-        ep = anchors.get(p.name, nxt)
-        out.append(ep)
-        nxt = ep + 1
+        if p.name in anchors:
+            current = anchors[p.name]
+            used = 0
+        out.append(current)
+        used += 1
+        if used >= per_episode:
+            current += 1
+            used = 0
     return out
 
 
@@ -224,6 +244,7 @@ def build_plan(season_dir: Path,
                ident: Optional[str] = None,
                ident_source: str = DEFAULT_ID_SOURCE,
                anchors: Optional[Dict[str, int]] = None,
+               per_episode: int = 1,
                rename_show_dir: bool = False) -> Plan:
     """The whole proposal, as data. Reads nothing from disk except the listing
     it is given, so it is fully testable without a media library."""
@@ -247,7 +268,7 @@ def build_plan(season_dir: Path,
         plan.issues.append("No files with a Plex fallback timecode in this folder.")
 
     dest_dir = plan.season_dir_target
-    for path, episode in zip(files, assign_episodes(files, anchors or {})):
+    for path, episode in zip(files, assign_episodes(files, anchors or {}, per_episode)):
         tc = timecode_of(path) or ""
         name = build_target_name(show_name, year, season, episode, tc, path.suffix)
         pf = PlannedFile(source=path, episode=episode, target=dest_dir / name)
@@ -263,21 +284,20 @@ def _check_collisions(plan: Plan) -> None:
     """Everything that would make this set of moves wrong, caught before
     anything moves — discovering it halfway through is how you end up with a
     half-renamed season."""
-    # Duplicate episode numbers. Note these do NOT collide as filenames: the
-    # timecode is part of the name, so two files can both be S01E04 and land
-    # side by side quite happily. Plex is what breaks — it sees two files
-    # claiming one episode. This is the check that actually fires in practice;
-    # the target-path check below is defence for a naming scheme that drops
-    # the timecode.
+    # Several files on one episode is NORMAL here, not an error: most Hawaii
+    # series air an episode and re-broadcast it the next day, and Plex records
+    # both. The two recordings are the same episode, distinguished only by
+    # their timecodes — which stay in the filename, so they never collide on
+    # disk. Reported as a neutral note so the grouping is visible while
+    # numbering a season, and deliberately not as an issue: blocking here
+    # would reject the correct plan for an entire library.
     by_episode: Dict[int, List[PlannedFile]] = {}
     for pf in plan.files:
         by_episode.setdefault(pf.episode, []).append(pf)
-    for episode, group in by_episode.items():
+    for episode in sorted(by_episode):
+        group = by_episode[episode]
         if len(group) > 1:
-            for pf in group:
-                others = [o.source.name for o in group if o is not pf]
-                pf.issues.append(
-                    "Episode {} is also used by {}".format(pad(episode), ", ".join(others)))
+            plan.notes.append("Episode {} has {} files".format(pad(episode), len(group)))
 
     seen: Dict[Path, PlannedFile] = {}
     for pf in plan.files:

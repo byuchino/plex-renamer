@@ -45,6 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--id-source", choices=("tmdb", "tvdb"), help="override the id source")
     p.add_argument("--episode", action="append", metavar="FILENAME=N",
                    help="anchor one file to an episode number; later files follow on")
+    p.add_argument("--per-episode", type=int, default=1, metavar="N",
+                   help="how many consecutive recordings share one episode number "
+                        "(2 for a series that is re-broadcast the next day)")
     p.add_argument("--rename-show-dir", action="store_true",
                    help="also propose renaming the show folder from show/year/id")
     return p
@@ -89,6 +92,7 @@ def main(argv=None) -> int:
         ident=ident,
         ident_source=ident_source,
         anchors=parse_episode_anchors(args.episode),
+        per_episode=args.per_episode,
         rename_show_dir=args.rename_show_dir,
     )
 
@@ -117,6 +121,11 @@ def main(argv=None) -> int:
     for path, why in plan.skipped:
         print("  skipped: {}  ({})".format(path.name, why))
     if plan.skipped:
+        print()
+
+    for note in plan.notes:
+        print("  note: {}".format(note))
+    if plan.notes:
         print()
 
     for issue in plan.issues:

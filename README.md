@@ -55,6 +55,18 @@ deliberately preferred over giving a general-purpose renamer write access to `jo
 | ID + TMDB/TVDB radio | `{tmdb-…}` / `{tvdb-…}` in the show folder; blank + TMDB when absent |
 | Season | season folder, unless it is a 4-digit year, then `01` |
 
+**Airings per episode.** Most Hawaii series are broadcast twice — the original and
+a re-broadcast the next day — and Plex records both, so a 16-file folder is routinely
+8 episodes rather than 16. A per-episode control sets how many consecutive recordings
+share one number (`2` gives 1,1,2,2,3,3…). **Several files on one episode is normal and
+never blocks a rename**; they cannot clash on disk because the timecode stays in the
+filename. It is reported as a neutral note so the grouping stays visible.
+
+Real folders are not always uniform: one series pairs every week (16 files, 8 episodes,
+zero corrections needed), another airs weekly singles for a while before pairing starts.
+An anchor always begins a fresh group, so a change of rhythm costs one pick rather than
+a correction on every row after it.
+
 **Table**, one row per matching file, sorted by timecode. Each row shows the editable
 proposed name and an **Episode** button opening a selectable matrix. Episodes start at
 `01` and increment; picking a value for a row **cascades forward** to later rows and

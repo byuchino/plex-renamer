@@ -165,18 +165,45 @@ def test_changing_season_updates_every_row_and_the_destination():
     assert all("- S03E" in f.target.name for f in plan.files)
 
 
-def test_duplicate_episode_numbers_are_flagged_on_both_rows():
-    """Two rows on the same episode do NOT collide as filenames — the timecode
-    keeps them distinct — but Plex sees two files claiming one episode, so it
-    still has to be caught."""
+def test_duplicate_episode_numbers_are_allowed_and_only_noted():
+    """Most Hawaii series air an episode and re-broadcast it the next day, and
+    Plex records both — so two files on one episode is the correct plan, not an
+    error. They never clash on disk because the timecode stays in the name."""
     fs = [SEASON_DIR / "Show (2026) - 2026-01-01 00 00 00.mp4",
           SEASON_DIR / "Show (2026) - 2026-01-02 00 00 00.mp4"]
     plan = core.build_plan(season_dir=SEASON_DIR, entries=fs, show_name="Show",
                            year="2026", season=1,
                            anchors={fs[0].name: 4, fs[1].name: 4})
-    assert not plan.ok
-    assert plan.files[0].target.name != plan.files[1].target.name  # not a name clash
-    assert all("Episode 04 is also used by" in f.issues[0] for f in plan.files)
+    assert plan.ok                                                  # not blocked
+    assert plan.files[0].target.name != plan.files[1].target.name   # no name clash
+    assert plan.notes == ["Episode 04 has 2 files"]
+
+
+def test_per_episode_pairs_each_episode_with_its_rebroadcast():
+    """The regular Hawaii case: 16 recordings are 8 episodes aired twice."""
+    eps = core.assign_episodes(files(16), {}, per_episode=2)
+    assert eps == [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8]
+
+
+def test_per_episode_of_one_is_unchanged_behaviour():
+    assert core.assign_episodes(files(4), {}, per_episode=1) == [1, 2, 3, 4]
+
+
+def test_anchor_starts_a_fresh_group_when_a_rebroadcast_is_missing():
+    """A week whose re-broadcast never aired: anchor at the break and the rest
+    re-pairs correctly, instead of every later row needing a correction."""
+    fs = files(6)
+    eps = core.assign_episodes(fs, {fs[3].name: 3}, per_episode=2)
+    assert eps == [1, 1, 2, 3, 3, 4]
+
+
+def test_per_episode_flows_through_build_plan():
+    fs = [SEASON_DIR / "Show (2026) - 2026-01-0{} 00 00 00.mp4".format(i) for i in range(1, 5)]
+    plan = core.build_plan(season_dir=SEASON_DIR, entries=fs, show_name="Show",
+                           year="2026", season=1, per_episode=2)
+    assert [f.episode for f in plan.files] == [1, 1, 2, 2]
+    assert plan.ok
+    assert plan.notes == ["Episode 01 has 2 files", "Episode 02 has 2 files"]
 
 
 def test_distinct_episode_numbers_are_clean():

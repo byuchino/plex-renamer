@@ -111,6 +111,14 @@ with `ss` from a second connection. To redeploy:
   numbers are not the check — a byte-identical diff against the pre-change code is. A
   sweep script (30 lines, drives `/api/plan` through the Flask test client) is quick to
   rewrite; run it on the VM in `/tmp`, since the NAS roots are not mounted locally.
+- **`os.access` is unusable on these NFS mounts — never permission-check with it.**
+  DSM's NFSv4.1 export answers `access(2)` itself, and reports `W_OK` **false** for a
+  directory that is mode 777, owned by the asking uid, and which `open(...,"w")` succeeds
+  on. `execute.py`'s pre-flight trusted it and refused every plan on the whole KIKU
+  library with "Cannot write to …". `_writable()` now probes by creating and unlinking a
+  dot-file, which is the only answer that means anything. Found by the first scratch-copy
+  run on 2026-08-17 — this is exactly the class of bug that run exists to catch, and no
+  amount of local tmp_path testing would have shown it.
 - **Duplicate episode numbers are legitimate.** Most KIKU series are broadcast twice and
   Plex records both. This is a neutral note, never an error — blocking on it would reject
   the correct plan for a whole library.

@@ -125,6 +125,9 @@ the page.
 
 - Pre-flight validation of the whole set — duplicate targets, existing destinations,
   root confinement, unwritable paths. Rename stays disabled while any row is invalid.
+  Writability is tested by **writing** a probe dot-file, not by asking `os.access`: both
+  libraries are NFS exports, and this DSM server answers `access(2)` itself, reporting
+  `W_OK` false for directories it then happily accepts writes to.
 - The set is explicitly **not atomic**: validate all up front, execute, report
   per-file results.
 - Confirmation dialog listing every old→new pair, guarded by a plan hash so the

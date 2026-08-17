@@ -23,6 +23,7 @@ Targets Python 3.8 (the deployment VM).
 """
 from __future__ import annotations
 
+import binascii
 import json
 import os
 import time
@@ -114,9 +115,34 @@ def _nearest_existing(path: Path) -> Path:
 
 
 def _writable(path: Path) -> bool:
-    # W_OK alone is not enough: creating an entry in a directory also needs the
-    # execute bit to traverse it.
-    return os.access(str(path), os.W_OK | os.X_OK)
+    """Whether a directory can actually be written to — tested by writing.
+
+    `os.access` is not usable here. Both libraries are NFS exports, and on NFS
+    access(2) is answered by the server's own permission evaluation rather than
+    from the mode bits the client can see. This DSM export reports W_OK false
+    for a directory that is mode 777, owned by the very uid asking, and which a
+    plain open()-for-write succeeds on — so trusting it refused a perfectly
+    valid plan on the whole KIKU library. Found by the first scratch-copy run
+    (Phase 4); it is the reason that run exists.
+
+    So: create a file and remove it. That is the only answer that means
+    anything, and it is what the rename is about to need anyway. The probe is
+    a dot-file with a random suffix so a concurrent request cannot collide with
+    it, and it is unlinked immediately.
+    """
+    probe = path / ".plex-renamer-write-probe-{}".format(
+        binascii.hexlify(os.urandom(6)).decode("ascii"))
+    try:
+        with probe.open("w"):
+            pass
+    except OSError:
+        return False
+    try:
+        probe.unlink()
+    except OSError:
+        # Written but not removable is still writable, which is what was asked.
+        pass
+    return True
 
 
 def _show_dir_to_rename(plan: core.Plan) -> Optional[Path]:

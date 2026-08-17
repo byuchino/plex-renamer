@@ -392,3 +392,52 @@ def test_undoing_a_run_that_did_nothing_is_refused(undo_dir):
     }))
     result = execute.undo("x.json", undo_dir, [Path("/")])
     assert any("no completed changes" in r for r in result.refused)
+
+
+# ── Writability is tested by writing, not asked of os.access ───────────────
+
+def test_writable_probes_by_writing_and_leaves_nothing_behind(tmp_path):
+    """os.access is unusable on these NFS exports: the DSM server answers
+    access(2) itself and reports W_OK false for a directory that is mode 777,
+    owned by the asking uid, and demonstrably writable. Trusting it refused a
+    valid plan across the whole KIKU library. So the check writes."""
+    d = tmp_path / "dir"
+    d.mkdir()
+    assert execute._writable(d) is True
+    assert list(d.iterdir()) == []          # probe cleaned up
+
+
+def test_writable_is_false_when_it_really_cannot_write(tmp_path):
+    d = tmp_path / "ro"
+    d.mkdir()
+    os.chmod(str(d), 0o500)
+    try:
+        assert execute._writable(d) is False
+    finally:
+        os.chmod(str(d), 0o700)
+
+
+def test_writable_does_not_consult_os_access(tmp_path, monkeypatch):
+    """The regression guard. A directory this process can write to must pass
+    even when os.access lies about it, which is exactly the NFS case."""
+    d = tmp_path / "nfs-like"
+    d.mkdir()
+    monkeypatch.setattr(execute.os, "access", lambda *a, **k: False)
+    assert execute._writable(d) is True
+
+
+def test_a_run_is_not_refused_when_os_access_lies(tree, undo_dir, monkeypatch):
+    """End to end: the plan that the real KIKU library refused must go through."""
+    root, season = tree
+    monkeypatch.setattr(execute.os, "access", lambda *a, **k: False)
+    result = execute.execute_plan(make_plan(season), [root], undo_dir)
+    assert result.refused == []
+    assert result.ok
+    assert (season.parent / "Season 01").is_dir()
+
+
+def test_no_probe_files_survive_a_run(tree, undo_dir):
+    root, season = tree
+    execute.execute_plan(make_plan(season), [root], undo_dir)
+    strays = [str(p.relative_to(root)) for p in root.rglob(".plex-renamer-write-probe-*")]
+    assert strays == []

@@ -2,7 +2,11 @@
 
 [general]
 # Comma-separated. Browsing is confined to these; nothing outside is reachable.
-roots    = /mnt/bama/volume1/TV Shows, /mnt/pippa/volume1/Videos/KIKU
+#
+# Both roots are on the HOME nas. The condo nas holds its own copy of the KIKU
+# library, but the two boxes sync it between themselves, so renaming the local
+# copy is enough — and it keeps this tool off the WireGuard tunnel entirely.
+roots    = /mnt/bama/volume1/TV Shows, /mnt/bama/volume1/Videos/KIKU
 undo_dir = /var/lib/plex-renamer/undo
 
 [server]

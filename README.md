@@ -189,7 +189,17 @@ the page reachable in one step from a headless browser.
 | Install path | `/opt/plex-renamer/` + own venv |
 | Service | `plex-renamer.service`, port **8101** (8099 = transcode dashboard, 8100 = worker API) |
 | Config | `/etc/plex-renamer/config.ini` — allowed roots |
-| Initial roots | `/mnt/bama/volume1/TV Shows`, `/mnt/pippa/volume1/Videos/KIKU` |
+| Initial roots | `/mnt/bama/volume1/TV Shows`, `/mnt/bama/volume1/Videos/KIKU` |
+
+**Both roots are on the home nas.** The condo nas has its own copy of the KIKU library,
+but the two boxes sync it between themselves, so renaming the local copy is enough. That
+keeps this tool off the WireGuard tunnel entirely — unlike the transcode pipeline, it has
+no remote-mount failure mode.
+
+They are still **separate NFS exports** (`TV Shows` and `Videos` are exported
+independently, `st_dev` 40 and 41), so `os.rename` between the two roots fails with
+`EXDEV` even though both live on one NAS volume. Moves within a root are fine, which is
+all the Phase 5 merge case needs — but the same-device check is required, not optional.
 
 **The VM runs Python 3.8.10.** Target 3.8 syntax: no `X | Y` unions, no builtin generic
 annotations at runtime without `from __future__ import annotations`. Local development

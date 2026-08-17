@@ -167,12 +167,19 @@
   .run.open .run-ops { display: block; }
   .twist { display: inline-block; color: var(--muted); transition: transform .12s; }
   .run.open .twist { transform: rotate(90deg); }
+  /* The row is the control, so it has to say so: a muted chevron alone is not
+     an affordance, and the first thing asked of this section was where to
+     click. */
+  .run-more { color: var(--accent); font-size: 12px; white-space: nowrap; }
+  .run-head:hover .run-more { text-decoration: underline; }
+  /* An available action, not a disabled one — bordered in warn rather than the
+     panel grey, which read as inert. */
   .run-undo {
-    background: transparent; border: 1px solid var(--border); color: var(--muted);
-    padding: 3px 9px; border-radius: 6px; font-size: 12px; cursor: pointer;
-    font-family: inherit; white-space: nowrap;
+    background: rgba(245,158,11,.12); border: 1px solid rgba(245,158,11,.5);
+    color: var(--warn); padding: 3px 9px; border-radius: 6px; font-size: 12px;
+    cursor: pointer; font-family: inherit; white-space: nowrap; font-weight: 600;
   }
-  .run-undo:hover { color: var(--text); border-color: var(--warn); }
+  .run-undo:hover { background: rgba(245,158,11,.25); border-color: var(--warn); }
   .badge.muted { background: rgba(139,147,167,.2); color: var(--muted); }
 
   .banner { padding: 12px 14px; border-bottom: 1px solid var(--border); }
@@ -801,13 +808,16 @@ async function renderRuns() {
     const what = r.renames + " file" + (r.renames === 1 ? "" : "s") +
                  " · " + esc(tailPath(r.season_dir));
     return '<div class="run" data-manifest="' + esc(r.manifest) + '">' +
-      '<button class="run-head">' +
+      '<button class="run-head" title="Show every operation in this run">' +
         '<span class="twist">&rsaquo;</span>' +
         '<span class="run-when">' + esc(whenText(r.created)) + "</span>" +
         '<span class="run-what mono">' + what + "</span>" +
+        '<span class="run-more">' + r.total + " operation" +
+          (r.total === 1 ? "" : "s") + "</span>" +
         runBadge(r) +
         (r.undoable
-          ? '<span class="run-undo" data-undo="' + esc(r.manifest) + '">Undo</span>'
+          ? '<span class="run-undo" data-undo="' + esc(r.manifest) +
+            '" title="Move every file in this run back">Undo</span>'
           : "") +
       "</button>" +
       '<div class="run-ops"><div class="pad note">Loading…</div></div>' +

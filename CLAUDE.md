@@ -11,8 +11,8 @@ the operational facts that are not derivable from the code.
 Phases 1 through 4 are complete: **installed as `plex-renamer.service` on the VM and able
 to move real files.** 233 tests.
 
-Multi-episode support (`episodes_per_file`, see below) is deployed. `/opt/plex-renamer`
-matches `HEAD` byte for byte (checked by md5). **`main` is not pushed** as of this commit.
+Multi-episode support (`episodes_per_file`, see below) is deployed. `main` is pushed and
+`/opt/plex-renamer` matches `HEAD` byte for byte (checked by md5).
 
 **Resume here — nothing is half-finished; these are choices, not chores:**
 

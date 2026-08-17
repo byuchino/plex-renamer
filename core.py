@@ -34,6 +34,23 @@ RE_SHOW_DIR = re.compile(
 
 RE_SEASON_DIR = re.compile(r"^Season\s+(?P<num>\d+)\s*$", re.IGNORECASE)
 
+# An already-episodic filename: "<head> - S01E04 - <tail>".
+#
+# The head is non-greedy so the FIRST episode marker wins, and the tail is
+# taken as everything after it rather than by splitting on ' - ' — real tails
+# contain their own dashes ("[Kioku] 1 Litre of Tears - 01"), and splitting
+# would truncate them. A file with no tail at all ("Show - S01E04.mkv") is
+# still episodic.
+RE_EPISODIC = re.compile(
+    r"^(?P<head>.+?)"
+    r"\s+-\s+S(?P<season>\d{1,4})E(?P<episode>\d{1,4})"
+    r"(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+
+# Strips the separator off a captured rest for display purposes only.
+RE_TAIL_SEP = re.compile(r"^\s*-\s*")
+
 DEFAULT_ID_SOURCE = "tmdb"
 DEFAULT_SEASON = 1
 
@@ -86,11 +103,32 @@ def parse_season_dir(name: str) -> Tuple[Optional[int], bool]:
     return int(num), False
 
 
-def derive_defaults(season_dir: Path) -> Defaults:
-    """Everything the form should be pre-filled with, from the path alone."""
+def derive_defaults(season_dir: Path,
+                    entries: Optional[Sequence[Path]] = None) -> Defaults:
+    """Everything the form should be pre-filled with.
+
+    The show name and year come from the folder, EXCEPT when the folder holds
+    already-episodic files that all agree on a different head — then the files
+    win. Real folders disagree with their contents ('Battlestar Galactica
+    (2003)' full of 'Battlestar Galactica - S04E01 - …'), and defaulting to the
+    folder there would open the page proposing to rename all 84 files. The
+    files are the thing being renamed, so they set the baseline; the folder is
+    only a fallback. Typing the year in still applies it to everything.
+    """
     show_dir = season_dir.parent
     show_name, year, ident, source = parse_show_dir(show_dir.name)
     season, was_year = parse_season_dir(season_dir.name)
+
+    heads = set()
+    for p in entries or []:
+        f = classify(p) if not p.is_dir() and p.suffix.lower() in VIDEO_SUFFIXES else None
+        if f is not None and f.kind == EPISODIC:
+            m = RE_EPISODIC.match(p.stem)
+            heads.add(m.group("head").strip())
+    if len(heads) == 1:
+        file_name, file_year, _, _ = parse_show_dir(heads.pop())
+        show_name = file_name
+        year = file_year
     return Defaults(
         show_name=show_name,
         year=year,
@@ -108,25 +146,92 @@ def timecode_of(path: Path) -> Optional[str]:
     return m.group("tc") if m else None
 
 
-def collect_files(entries: Sequence[Path]) -> Tuple[List[Path], List[Tuple[Path, str]]]:
+TIMECODE = "timecode"
+EPISODIC = "episodic"
+
+
+@dataclass
+class SourceFile:
+    """One file on disk, decomposed into the parts a name is rebuilt from.
+
+    `tail_raw` is everything after the episode marker *exactly as written*,
+    separator and all: the timecode for a Plex fallback file, and whatever the
+    existing name carries for an already episodic one — usually a release
+    string ('720p.BluRay.x264.ShAaNiG'), not an episode title.
+
+    It is kept byte-for-byte rather than cleaned up because real names contain
+    double spaces, trailing spaces and dangling separators, and "tidying" them
+    would propose renaming hundreds of files nobody asked about. `tail` is the
+    readable version, for display only.
+    """
+    path: Path
+    kind: str
+    tail_raw: str
+    season: Optional[int] = None
+    episode: Optional[int] = None
+
+    @property
+    def name(self) -> str:
+        return self.path.name
+
+    @property
+    def tail(self) -> str:
+        return RE_TAIL_SEP.sub("", self.tail_raw).strip()
+
+
+def classify(path: Path) -> Optional[SourceFile]:
+    """Decompose a filename, or None if it is neither form we can rename.
+
+    Episodic is tried first: a file can carry both an episode marker and a
+    date-like string in its tail, and the marker is the stronger signal.
+    """
+    m = RE_EPISODIC.match(path.stem)
+    if m:
+        return SourceFile(
+            path=path,
+            kind=EPISODIC,
+            tail_raw=m.group("rest") or "",
+            season=int(m.group("season")),
+            episode=int(m.group("episode")),
+        )
+    tc = timecode_of(path)
+    if tc is not None:
+        return SourceFile(path=path, kind=TIMECODE, tail_raw=" - " + tc)
+    return None
+
+
+def sort_key(f: SourceFile):
+    """One ordering over a mixed folder, because the episode cascade has to
+    walk a single well-defined sequence.
+
+    Already-numbered files come first in episode order, then the undated
+    recordings in time order — so timecode files continue after the episodes
+    that already exist rather than colliding with them from E01.
+    """
+    if f.kind == EPISODIC:
+        return (0, f.season or 0, f.episode or 0, f.name)
+    return (1, 0, 0, f.tail + f.name)
+
+
+def collect_files(entries: Sequence[Path]) -> Tuple[List[SourceFile], List[Tuple[Path, str]]]:
     """Split a directory listing into renameable files and explicitly skipped
     ones. Skipped entries are returned with a reason rather than dropped — a
     file silently missing from the page is how you rename half a season and
     not notice."""
-    renameable: List[Path] = []
+    renameable: List[SourceFile] = []
     skipped: List[Tuple[Path, str]] = []
     for p in entries:
         if p.is_dir():
             continue
         if p.suffix.lower() not in VIDEO_SUFFIXES:
             skipped.append((p, "not a video file"))
-        elif timecode_of(p) is None:
-            skipped.append((p, "no Plex fallback timecode in the name"))
+            continue
+        f = classify(p)
+        if f is None:
+            skipped.append((p, "no S00E00 marker and no Plex fallback timecode"))
         else:
-            renameable.append(p)
-    # Sort by timecode, which is what the episode numbering walks. The timecode
-    # format sorts correctly as a string (fixed-width, most-significant first).
-    renameable.sort(key=lambda p: (timecode_of(p) or "", p.name))
+            renameable.append(f)
+    renameable.sort(key=sort_key)
     return renameable, skipped
 
 
@@ -137,6 +242,7 @@ class PlannedFile:
     source: Path
     episode: int
     target: Path
+    kind: str = TIMECODE
     issues: List[str] = field(default_factory=list)
 
     @property
@@ -180,16 +286,21 @@ class Plan:
 
 
 def build_target_name(show_name: str, year: Optional[str], season: int,
-                      episode: int, timecode: str, suffix: str) -> str:
+                      episode: int, tail_raw: str, suffix: str) -> str:
     """'Nagatan and Aoto (2026) - S01E02 - 2026-06-23 17 00 00.mp4'.
 
     The year is part of the convention the transcode pipeline already writes,
     so files renamed here sit consistently alongside ones it produced. It is
     omitted entirely — rather than rendered as '()' — when unknown.
+
+    `tail_raw` carries its own separator and is appended verbatim, making this
+    the exact inverse of RE_EPISODIC — which is what lets an already-correct
+    episodic file propose itself unchanged rather than being "normalised" into
+    a slightly different name.
     """
     show = show_name.strip()
     head = "{} ({})".format(show, year) if year else show
-    return "{} - S{}E{} - {}{}".format(head, pad(season), pad(episode), timecode, suffix)
+    return "{} - S{}E{}{}{}".format(head, pad(season), pad(episode), tail_raw, suffix)
 
 
 def build_show_dir_name(show_name: str, year: Optional[str],
@@ -200,7 +311,7 @@ def build_show_dir_name(show_name: str, year: Optional[str],
     return name
 
 
-def assign_episodes(files: Sequence[Path], anchors: Dict[str, int],
+def assign_episodes(files: Sequence[SourceFile], anchors: Dict[str, int],
                     per_episode: int = 1) -> List[int]:
     """Episode number per file, in order.
 
@@ -219,18 +330,30 @@ def assign_episodes(files: Sequence[Path], anchors: Dict[str, int],
     An anchor always starts a fresh group, so an irregular run (a week where
     the re-broadcast was missed, which does happen) is fixed by anchoring at
     the point it breaks rather than by correcting every row after it.
+
+    A file that already carries an S00E00 marker is an *implicit* anchor: its
+    number comes from its own name and holds. That is what makes a mixed
+    folder work — four new recordings dropped beside an existing E01-E10 get
+    E11 onward instead of restarting at E01. per_episode groups only the
+    undated run, since numbered files already state their own episode.
     """
     per_episode = max(1, per_episode)
     out: List[int] = []
     current = 1
     used = 0
-    for p in files:
-        if p.name in anchors:
-            current = anchors[p.name]
+    for f in files:
+        explicit = f.name in anchors
+        if explicit:
+            current = anchors[f.name]
+            used = 0
+        elif f.kind == EPISODIC and f.episode is not None:
+            current = f.episode
             used = 0
         out.append(current)
         used += 1
-        if used >= per_episode:
+        # A numbered file never shares its number with the next file by way of
+        # grouping; only the undated run does that.
+        if used >= per_episode or (f.kind == EPISODIC and not explicit):
             current += 1
             used = 0
     return out
@@ -287,7 +410,17 @@ def build_plan(season_dir: Path,
     # Files move into a correctly-named season folder rather than the folder
     # being renamed in place, so one 'Season YYYY' can later be split across
     # several real seasons (README).
-    plan.season_dir_target = show_dir / "Season {}".format(pad(season))
+    #
+    # But if the folder ALREADY denotes the requested season, keep it exactly
+    # as it is. Real libraries use both 'Season 1' and 'Season 01' (both are
+    # common here), and always targeting the padded form would propose moving
+    # every file out of a perfectly good 'Season 1' into a second folder,
+    # splitting the season in two.
+    current_season, _ = parse_season_dir(season_dir.name)
+    if current_season is not None and current_season == season:
+        plan.season_dir_target = season_dir
+    else:
+        plan.season_dir_target = show_dir / "Season {}".format(pad(season))
     if rename_show_dir:
         plan.show_dir_target = show_dir.parent / build_show_dir_name(
             show_name, year, ident, ident_source)
@@ -297,13 +430,14 @@ def build_plan(season_dir: Path,
     if season < 0:
         plan.issues.append("Season must be zero or greater.")
     if not files:
-        plan.issues.append("No files with a Plex fallback timecode in this folder.")
+        plan.issues.append("No renameable video files in this folder.")
 
     overrides = name_overrides or {}
     dest_dir = plan.season_dir_target
-    for path, episode in zip(files, assign_episodes(files, anchors or {}, per_episode)):
-        tc = timecode_of(path) or ""
-        name = build_target_name(show_name, year, season, episode, tc, path.suffix)
+    mismatched_seasons = set()
+    for f, episode in zip(files, assign_episodes(files, anchors or {}, per_episode)):
+        path = f.path
+        name = build_target_name(show_name, year, season, episode, f.tail_raw, path.suffix)
         override_issues: List[str] = []
         if path.name in overrides:
             typed = overrides[path.name]
@@ -312,11 +446,23 @@ def build_plan(season_dir: Path,
             # still shows a sane target next to the reason it was rejected.
             if not override_issues:
                 name = typed.strip()
-        pf = PlannedFile(source=path, episode=episode, target=dest_dir / name)
+        pf = PlannedFile(source=path, episode=episode, target=dest_dir / name,
+                         kind=f.kind)
         pf.issues.extend(override_issues)
         if episode < 1:
             pf.issues.append("Episode must be 1 or greater.")
         plan.files.append(pf)
+        if f.kind == EPISODIC and f.season is not None and f.season != season:
+            mismatched_seasons.add(f.season)
+
+    # A file that says S02 in a folder being planned as season 1 is reported,
+    # never silently renumbered — it is as likely to be a misfiled recording
+    # as a wrong season box, and only the user knows which.
+    for bad in sorted(mismatched_seasons):
+        plan.notes.append(
+            "{} file(s) are named S{} but this plan writes S{}".format(
+                sum(1 for x in files if x.kind == EPISODIC and x.season == bad),
+                pad(bad), pad(season)))
 
     _check_collisions(plan)
     return plan

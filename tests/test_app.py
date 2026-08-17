@@ -251,7 +251,7 @@ def test_empty_folder_is_an_issue_not_a_crash(client, library):
     assert code == 200
     assert data["ok"] is False
     assert data["files"] == []
-    assert "No files with a Plex fallback timecode" in " ".join(data["issues"])
+    assert "No renameable video files" in " ".join(data["issues"])
 
 
 # ── Phase 2 is read-only ───────────────────────────────────────────────────
@@ -279,3 +279,72 @@ def test_no_module_can_mutate_the_filesystem(module):
     for forbidden in ("os.rename", "os.replace", "shutil.move", ".mkdir(",
                       ".unlink(", ".rmdir(", ".write_text(", "open("):
         assert forbidden not in source, "{} contains {}".format(module, forbidden)
+
+
+def test_show_folder_preview_is_offered_before_the_box_is_ticked(client, library):
+    """The checkbox has to say what it would do while still unticked."""
+    _, season = library
+    _, data = get_plan(client, path=str(season))
+    assert data["show_dir_target"] is None                       # opt-in, not proposed
+    assert data["show_dir_current"] == "Nagatan and Aoto (2026) {tvdb-428763}"
+    assert data["show_dir_preview"] == "Nagatan and Aoto (2026) {tvdb-428763}"
+
+
+def test_show_folder_preview_tracks_the_inputs(client, library):
+    _, season = library
+    _, data = get_plan(client, path=str(season), show_name="Renamed Show")
+    assert data["show_dir_preview"] == "Renamed Show (2026) {tvdb-428763}"
+    assert data["show_dir_current"] == "Nagatan and Aoto (2026) {tvdb-428763}"
+
+
+# ── Mixed and episodic folders (Phase 2.5) ─────────────────────────────────
+
+@pytest.fixture
+def mixed_library(tmp_path):
+    """Three named episodes plus two new fallback recordings in one folder."""
+    root = (tmp_path / "TV Shows").resolve()
+    season = root / "Some Show (2019)" / "Season 01"
+    season.mkdir(parents=True)
+    for n in (1, 2, 3):
+        (season / "Some Show (2019) - S01E0{} - 1080p.WEB.mkv".format(n)).touch()
+    for tc in ("2026-06-22 23 00 00", "2026-06-23 17 00 00"):
+        (season / "Some Show (2019) - {}.mkv".format(tc)).touch()
+    return root, season
+
+
+@pytest.fixture
+def mixed_client(mixed_library):
+    root, _ = mixed_library
+    return create_app(Config(roots=[root])).test_client()
+
+
+def test_mixed_folder_lists_both_kinds_with_numbers_continuing(mixed_client, mixed_library):
+    _, season = mixed_library
+    code, data = get_plan(mixed_client, path=str(season))
+    assert code == 200
+    assert [f["kind"] for f in data["files"]] == \
+        ["episodic", "episodic", "episodic", "timecode", "timecode"]
+    # the new recordings continue after the episodes that already exist
+    assert [f["episode"] for f in data["files"]] == [1, 2, 3, 4, 5]
+
+
+def test_mixed_folder_only_changes_the_new_recordings(mixed_client, mixed_library):
+    _, season = mixed_library
+    _, data = get_plan(mixed_client, path=str(season))
+    changed = [f for f in data["files"] if not f["unchanged"]]
+    assert data["move_count"] == 2
+    assert data["file_count"] == 5
+    assert [f["kind"] for f in changed] == ["timecode", "timecode"]
+    assert changed[0]["target_name"] == "Some Show (2019) - S01E04 - 2026-06-22 23 00 00.mkv"
+
+
+def test_an_episodic_folder_opens_as_a_no_op(mixed_client, mixed_library):
+    """Nothing proposed, and the season folder is left exactly as named."""
+    root, season = mixed_library
+    for p in season.iterdir():
+        if "2026-" in p.name:
+            p.unlink()
+    _, data = get_plan(mixed_client, path=str(season))
+    assert data["move_count"] == 0
+    assert data["ok"] is True
+    assert data["season_dir_target"] == str(season)

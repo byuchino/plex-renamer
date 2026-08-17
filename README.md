@@ -67,6 +67,36 @@ zero corrections needed), another airs weekly singles for a while before pairing
 An anchor always begins a fresh group, so a change of rhythm costs one pick rather than
 a correction on every row after it.
 
+**Already-episodic and mixed folders.** A file carrying an `S00E00` marker is
+recognised too, and its episode number comes from its own name. Everything after the
+marker — usually a release string (`720p.BluRay.x264.ShAaNiG`), not an episode title —
+is preserved **byte for byte**, including double spaces, trailing spaces and dangling
+separators. They look like defects, but tidying them would propose renaming hundreds of
+files nobody asked about. Verified against 60 real season folders: 58 propose no change
+at all, and the only one that does is a genuine fix (`S06e01` → `S06E01`).
+
+For the same reason the show name and year default **from the files** when a folder's
+episodic contents all agree on a head that differs from the folder name — a real
+`Battlestar Galactica (2003)` folder is full of `Battlestar Galactica - S04E01 - …`, and
+defaulting to the folder there would open the page proposing to rename all 84 files.
+The folder is the fallback, used when the files disagree with each other.
+
+In a **mixed** folder both kinds appear in one table, ordered numbered-files-first by
+episode and then undated recordings by timecode. Numbered files are *implicit anchors*:
+they hold their own number, and the undated run continues after them — four new
+recordings beside an existing E01–E03 become E04+, not a second E01. `per_episode`
+groups only the undated run. An explicit pick on a numbered file moves that one file and
+does not cascade through later numbered ones, since those carry their own numbers and
+renumbering a whole run off one pick would destroy deliberate gaps.
+
+A file whose parsed season disagrees with the season being written is **noted, never
+silently renumbered** — it is as likely to be a misfiled recording as a wrong season box.
+
+**Season folder:** if the current folder already denotes the requested season it is left
+exactly as named. Both `Season 1` and `Season 01` are common in a real library (116 and
+55 of them here), and always targeting the padded form would move every file out of a
+perfectly good `Season 1` into a second folder, splitting the season in two.
+
 **Table**, one row per matching file, sorted by timecode. Each row shows the editable
 proposed name and an **Episode** button opening a selectable matrix. Episodes start at
 `01` and increment; picking a value for a row **cascades forward** to later rows and
@@ -178,12 +208,20 @@ previous version and go looking for a bug that is not there.
 
 ## Status
 
-**Phases 1 and 2 complete. Nothing deployed, and no code in this repo can move a file.**
+**Phases 1, 2 and 2.5 complete. Nothing deployed, and no code in this repo can move a
+file.**
 
-The page browses the configured roots, derives all four inputs from the path, live
-re-plans on every edit, groups re-broadcasts via airings-per-episode, cascades an
-episode pick forward, and validates hand-typed names — with the Rename button
-permanently disabled until Phase 3 supplies an endpoint behind it.
+The page browses the configured roots, derives all four inputs from the path (or from
+the files, see above), live re-plans on every edit, groups re-broadcasts via
+airings-per-episode, cascades an episode pick forward, handles episodic and mixed
+folders, and validates hand-typed names — with the Rename button permanently disabled
+until Phase 3 supplies an endpoint behind it.
+
+**Known gap, deliberately not built:** renumbering a *run* of already-episodic files
+(an off-by-one across a whole season) takes one pick per file today, because a pick
+never cascades through numbered files. The fix, if it is ever wanted, is to shift
+subsequent numbered files by the same delta rather than resequencing them, so gaps
+survive.
 
 Phase 3 is next: `execute.py`, the undo manifest, the confirmation dialog, and the plan
 hash check. That is the first phase that can change a library, so `test_app.py`'s

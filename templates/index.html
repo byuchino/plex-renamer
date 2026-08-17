@@ -62,6 +62,12 @@
   .ep-btn.anchored { background: rgba(245,158,11,.15); color: var(--warn); }
   .row-issue { color: var(--bad); font-size: 12px; }
   tr.edited td.tgt input { border-color: var(--warn); }
+  tr.unchanged td.src, tr.unchanged td.tgt input { opacity: .55; }
+  tr.unchanged td.arrow { visibility: hidden; }
+  .kind { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px;
+          text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+  .kind.episodic { background: rgba(34,197,94,.15); color: var(--ok); }
+  .kind.timecode { background: rgba(59,130,246,.15); color: var(--accent); }
   .clear-edit { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; padding: 0 4px; }
   .clear-edit:hover { color: var(--text); }
 
@@ -152,7 +158,7 @@
     </div>
     <div class="checkrow">
       <input type="checkbox" id="f-renamedir">
-      <label for="f-renamedir">Also rename the show folder to <span class="mono" id="showdir-preview">—</span></label>
+      <label for="f-renamedir">Also rename the show folder <span class="mono" id="showdir-preview">—</span></label>
     </div>
     <div class="pad note" id="dest-line"></div>
   </section>
@@ -161,7 +167,7 @@
     <h2>Files</h2>
     <table>
       <thead>
-        <tr><th style="width:44px">Ep</th><th>Current name</th><th style="width:24px"></th><th>Proposed name</th></tr>
+        <tr><th style="width:44px">Ep</th><th style="width:74px">Format</th><th>Current name</th><th style="width:24px"></th><th>Proposed name</th></tr>
       </thead>
       <tbody id="rows"></tbody>
     </table>
@@ -247,6 +253,11 @@ async function browse(path) {
 
   const list = document.getElementById("dirlist");
   let html = "";
+  if (!data.at_top) {
+    // Always offered, including at a root: without it there is no way back to
+    // the root list to pick the other library.
+    html += '<button class="dir" data-path="">⌂ roots</button>';
+  }
   if (data.parent) {
     html += '<button class="dir" data-path="' + esc(data.parent) + '">↑ up</button>';
   }
@@ -256,7 +267,7 @@ async function browse(path) {
   if (!data.dirs.length && !data.parent) html = '<span class="note">No roots configured.</span>';
   list.innerHTML = html;
   list.querySelectorAll(".dir").forEach(function (b) {
-    b.onclick = function () { open(b.dataset.path); };
+    b.onclick = function () { open(b.dataset.path || null); };
   });
 
   // A folder holding timecode files is one worth planning; otherwise this is
@@ -274,11 +285,13 @@ async function browse(path) {
 }
 
 function open(path) {
-  const encoded = path ? "#path=" + encodeURIComponent(path) : "#";
+  // '#path=' with an empty value is the roots list, so every destination has a
+  // distinct hash and hashchange stays the single thing that drives a browse.
+  const encoded = "#path=" + encodeURIComponent(path || "");
   if (location.hash !== encoded) {
-    location.hash = encoded;   // hashchange drives the browse
+    location.hash = encoded;
   } else {
-    browse(path);
+    browse(path || null);
   }
 }
 
@@ -329,8 +342,10 @@ function render(data) {
   const radio = document.querySelector('input[name=idsrc][value="' + data.inputs.ident_source + '"]');
   if (radio) radio.checked = true;
 
-  document.getElementById("showdir-preview").textContent =
-    data.show_dir_target ? data.show_dir_target.split("/").pop() : "(unchanged)";
+  document.getElementById("showdir-preview").innerHTML =
+    data.show_dir_preview === data.show_dir_current
+      ? "&mdash; already named <b>" + esc(data.show_dir_current) + "</b>"
+      : "<b>" + esc(data.show_dir_current) + "</b> &rarr; <b>" + esc(data.show_dir_preview) + "</b>";
   document.getElementById("dest-line").innerHTML =
     "Files move into <span class='mono'>" + esc(data.season_dir_target) + "</span>" +
     (data.season_dir_was_year
@@ -343,9 +358,11 @@ function render(data) {
   tbody.innerHTML = data.files.map(function (f) {
     const anchored = Object.prototype.hasOwnProperty.call(state.anchors, f.source_name);
     const edited = Object.prototype.hasOwnProperty.call(state.overrides, f.source_name);
-    return "<tr" + (edited ? ' class="edited"' : "") + ">" +
+    const cls = [edited ? "edited" : "", f.unchanged ? "unchanged" : ""].join(" ").trim();
+    return "<tr" + (cls ? ' class="' + cls + '"' : "") + ">" +
       '<td><button class="ep-btn' + (anchored ? " anchored" : "") + '" data-name="' +
         esc(f.source_name) + '">' + String(f.episode).padStart(2, "0") + "</button></td>" +
+      '<td><span class="kind ' + esc(f.kind) + '">' + esc(f.kind) + "</span></td>" +
       '<td class="src mono">' + esc(f.source_name) + "</td>" +
       '<td class="arrow">→</td>' +
       '<td class="tgt"><input type="text" class="mono" data-name="' + esc(f.source_name) +
@@ -386,8 +403,13 @@ function render(data) {
   const issues = data.issues.map(function (i) {
     return '<div class="issue">' + esc(i) + "</div>";
   }).join("");
+  // Says what would actually change, not just how many files are listed —
+  // opening an already-correct folder should read as an obvious no-op.
   document.getElementById("summary").innerHTML =
-    issues + data.move_count + " file(s) would be renamed, " + data.skipped.length + " skipped";
+    issues + (data.move_count === 0
+      ? "nothing would change &mdash; all " + data.file_count + " file(s) already match"
+      : "<b>" + data.move_count + " of " + data.file_count + "</b> file(s) would change") +
+    ", " + data.skipped.length + " skipped";
   document.getElementById("verdict").innerHTML = data.ok
     ? '<span class="badge ok">plan is valid</span>'
     : '<span class="badge bad">plan has problems</span>';

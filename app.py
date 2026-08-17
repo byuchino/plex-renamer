@@ -81,7 +81,8 @@ def _plan_response(cfg: Config, payload: Dict[str, Any]):
     if not season_dir.is_dir():
         return _error("not a directory: {}".format(season_dir))
 
-    defaults = core.derive_defaults(season_dir)
+    entries = _dir_entries(season_dir)
+    defaults = core.derive_defaults(season_dir, entries)
 
     # Absent key -> use the value derived from the path. Present key -> use it,
     # including when it is empty (see _str_or_none).
@@ -112,7 +113,7 @@ def _plan_response(cfg: Config, payload: Dict[str, Any]):
 
     plan = core.build_plan(
         season_dir=season_dir,
-        entries=_dir_entries(season_dir),
+        entries=entries,
         show_name=show_name,
         year=year,
         season=season,
@@ -140,11 +141,16 @@ def _plan_response(cfg: Config, payload: Dict[str, Any]):
         "season_dir_was_year": defaults.season_dir_was_year,
         "season_dir_target": str(plan.season_dir_target) if plan.season_dir_target else None,
         "show_dir_target": str(plan.show_dir_target) if plan.show_dir_target else None,
+        # What the show folder *would* become, computed whether or not the box
+        # is ticked — the checkbox is unreadable if the name it offers only
+        # appears after you have already agreed to it.
+        "show_dir_current": season_dir.parent.name,
+        "show_dir_preview": core.build_show_dir_name(show_name, year, ident, ident_source),
         "files": [
             {
                 "source": str(f.source),
                 "source_name": f.source.name,
-                "timecode": core.timecode_of(f.source),
+                "kind": f.kind,
                 "episode": f.episode,
                 "target_name": f.target_name,
                 "unchanged": f.unchanged,
@@ -157,6 +163,7 @@ def _plan_response(cfg: Config, payload: Dict[str, Any]):
         "notes": plan.notes,
         "ok": plan.ok,
         "move_count": len(plan.moves),
+        "file_count": len(plan.files),
         "fingerprint": plan.fingerprint(),
     })
 

@@ -49,21 +49,61 @@ def test_derive_defaults_falls_back_to_tmdb_when_folder_has_no_id():
 
 # ── File collection ────────────────────────────────────────────────────────
 
-def test_collect_files_sorts_by_timecode_and_reports_skips():
+def test_collect_files_orders_numbered_files_before_undated_ones():
+    """Mixed folder: already-numbered files lead, in episode order, then the
+    fallback recordings in time order — so new recordings continue after the
+    episodes that exist rather than colliding with them."""
     entries = [
         Path("/s/Show (2026) - 2026-07-06 23 00 00.mp4"),
         Path("/s/Show (2026) - 2026-06-22 23 00 00.mp4"),
-        Path("/s/Show (2026) - S01E01 - Real Title.mp4"),   # already named
+        Path("/s/Show (2026) - S01E02 - Real Title.mp4"),
+        Path("/s/Show (2026) - S01E01 - Real Title.mp4"),
         Path("/s/poster.jpg"),
     ]
     files, skipped = core.collect_files(entries)
     assert [f.name for f in files] == [
+        "Show (2026) - S01E01 - Real Title.mp4",
+        "Show (2026) - S01E02 - Real Title.mp4",
         "Show (2026) - 2026-06-22 23 00 00.mp4",
         "Show (2026) - 2026-07-06 23 00 00.mp4",
     ]
-    reasons = {p.name: why for p, why in skipped}
-    assert reasons["poster.jpg"] == "not a video file"
-    assert "timecode" in reasons["Show (2026) - S01E01 - Real Title.mp4"]
+    assert [f.kind for f in files] == ["episodic", "episodic", "timecode", "timecode"]
+    assert [(p.name, why) for p, why in skipped] == [("poster.jpg", "not a video file")]
+
+
+def test_a_file_in_neither_form_is_skipped_with_a_reason():
+    files, skipped = core.collect_files([Path("/s/random home video.mp4")])
+    assert files == []
+    assert "no S00E00 marker" in skipped[0][1]
+
+
+@pytest.mark.parametrize("name, tail, season, episode", [
+    # Real names from the library: release tails, no year, dashes in the tail.
+    ("11.22.63 - S01E01 - 720p.BluRay.x264.ShAaNiG.mkv",
+     "720p.BluRay.x264.ShAaNiG", 1, 1),
+    ("1 Litre of Tears - S01E03 - [Kioku] 1 Litre of Tears - 03.avi",
+     "[Kioku] 1 Litre of Tears - 03", 1, 3),
+    ("24 Legacy - S01E11 - 1080P WEB-DL DD5 1 H264-LIGAS.mkv",
+     "1080P WEB-DL DD5 1 H264-LIGAS", 1, 11),
+    ("Show - S02E04.mkv", "", 2, 4),
+])
+def test_classify_decomposes_real_episodic_names(name, tail, season, episode):
+    f = core.classify(Path("/s/" + name))
+    assert (f.kind, f.tail, f.season, f.episode) == ("episodic", tail, season, episode)
+
+
+@pytest.mark.parametrize("name", [
+    "11.22.63 - S01E01 - 720p.BluRay.x264.ShAaNiG.mkv",
+    "1 Litre of Tears - S01E03 - [Kioku] 1 Litre of Tears - 03.avi",
+    "24 Legacy - S01E11 - 1080P WEB-DL DD5 1 H264-LIGAS.mkv",
+    "Show - S02E04.mkv",
+])
+def test_reassembly_round_trips_an_already_correct_name(name):
+    """The whole basis of 'an untouched episodic folder proposes no changes'."""
+    p = Path("/s/" + name)
+    f = core.classify(p)
+    head, year, _, _ = core.parse_show_dir(name.split(" - S")[0])
+    assert core.build_target_name(head, year, f.season, f.episode, f.tail_raw, p.suffix) == name
 
 
 def test_timecode_found_in_raw_recording_form():
@@ -75,18 +115,18 @@ def test_timecode_found_in_raw_recording_form():
 
 def test_build_target_name_matches_pipeline_convention():
     assert core.build_target_name(
-        "Nagatan and Aoto", "2026", 1, 2, "2026-06-23 17 00 00", ".mp4"
+        "Nagatan and Aoto", "2026", 1, 2, " - 2026-06-23 17 00 00", ".mp4"
     ) == "Nagatan and Aoto (2026) - S01E02 - 2026-06-23 17 00 00.mp4"
 
 
 def test_build_target_name_omits_year_when_unknown():
     assert core.build_target_name(
-        "Nagatan and Aoto", None, 1, 2, "2026-06-23 17 00 00", ".mp4"
+        "Nagatan and Aoto", None, 1, 2, " - 2026-06-23 17 00 00", ".mp4"
     ) == "Nagatan and Aoto - S01E02 - 2026-06-23 17 00 00.mp4"
 
 
 def test_build_target_name_preserves_suffix_and_pads():
-    assert core.build_target_name("S", "2020", 12, 7, "2026-01-01 00 00 00", ".mkv") \
+    assert core.build_target_name("S", "2020", 12, 7, " - 2026-01-01 00 00 00", ".mkv") \
         == "S (2020) - S12E07 - 2026-01-01 00 00 00.mkv"
 
 
@@ -102,7 +142,13 @@ def test_build_show_dir_name(ident, source, expected):
 # ── Episode assignment and cascade ─────────────────────────────────────────
 
 def files(n):
-    return [Path("/s/Show (2026) - 2026-01-{:02d} 00 00 00.mp4".format(i + 1)) for i in range(n)]
+    return [core.classify(Path("/s/Show (2026) - 2026-01-{:02d} 00 00 00.mp4".format(i + 1)))
+            for i in range(n)]
+
+
+def episodic(*numbers):
+    return [core.classify(Path("/s/Show (2026) - S01E{:02d} - Title.mp4".format(n)))
+            for n in numbers]
 
 
 def test_episodes_start_at_one_and_increment():
@@ -284,3 +330,133 @@ def test_overrides_are_collision_checked_like_derived_names():
     plan = a_plan(name_overrides={FIRST: "Same.mp4", SECOND: "Same.mp4"})
     assert not plan.ok
     assert any("Same target as" in i for i in plan.files[0].issues)
+
+
+# ── Mixed folders and already-episodic files (Phase 2.5) ───────────────────
+
+def test_numbered_files_hold_their_own_numbers():
+    assert core.assign_episodes(episodic(1, 2, 3), {}) == [1, 2, 3]
+
+
+def test_numbered_files_keep_a_gap_rather_than_being_renumbered():
+    """E01, E05, E06 stays that way — the names are the source of truth."""
+    assert core.assign_episodes(episodic(1, 5, 6), {}) == [1, 5, 6]
+
+
+def test_undated_recordings_continue_after_the_episodes_that_exist():
+    """The mixed-folder rule: four new recordings beside E01-E03 become E04+,
+    not a second E01."""
+    mixed = episodic(1, 2, 3) + files(4)
+    assert core.assign_episodes(mixed, {}) == [1, 2, 3, 4, 5, 6, 7]
+
+
+def test_per_episode_groups_only_the_undated_run():
+    mixed = episodic(1, 2) + files(4)
+    assert core.assign_episodes(mixed, {}, per_episode=2) == [1, 2, 3, 3, 4, 4]
+
+
+def test_an_explicit_anchor_moves_one_numbered_file_and_no_others():
+    """A pick overrides the file it was made on. It does NOT cascade through
+    later numbered files, because those carry their own numbers — renumbering
+    a whole run off one pick would silently destroy deliberate gaps."""
+    fs = episodic(1, 2, 3)
+    assert core.assign_episodes(fs, {fs[1].name: 9}) == [1, 9, 3]
+
+
+def test_an_anchor_on_a_numbered_file_still_cascades_into_undated_ones():
+    fs = episodic(1, 2) + files(2)
+    assert core.assign_episodes(fs, {fs[1].name: 9}) == [1, 9, 10, 11]
+
+
+def test_an_untouched_episodic_folder_proposes_nothing():
+    """Point the tool at a correct folder and it must be a visible no-op."""
+    season = Path("/lib/24 Legacy/Season 01")
+    entries = [
+        season / "24 Legacy - S01E01 - 1080P WEB-DL DD5 1 H264-LIGAS.mkv",
+        season / "24 Legacy - S01E02 - 1080P AMZN WEBRIP DD5 1 HEVC X265.mkv",
+    ]
+    plan = core.build_plan(season_dir=season, entries=entries,
+                           show_name="24 Legacy", year=None, season=1)
+    assert plan.ok
+    assert plan.moves == []
+    assert all(f.unchanged for f in plan.files)
+
+
+def test_an_unpadded_season_folder_is_left_alone():
+    """'Season 1' already denotes season 1; targeting 'Season 01' would split
+    the season across two folders. 116 'Season 01' and 55 'Season 1' folders
+    both exist in the real library."""
+    season = Path("/lib/Show/Season 1")
+    entries = [season / "Show - S01E01 - Tail.mkv"]
+    plan = core.build_plan(season_dir=season, entries=entries,
+                           show_name="Show", year=None, season=1)
+    assert plan.season_dir_target == season
+    assert plan.moves == []
+
+
+def test_a_real_season_change_still_moves_into_a_padded_folder():
+    season = Path("/lib/Show/Season 1")
+    entries = [season / "Show - S01E01 - Tail.mkv"]
+    plan = core.build_plan(season_dir=season, entries=entries,
+                           show_name="Show", year=None, season=2)
+    assert plan.season_dir_target == Path("/lib/Show/Season 02")
+    assert plan.files[0].target_name == "Show - S02E01 - Tail.mkv"
+
+
+def test_a_season_disagreement_is_noted_not_silently_renumbered():
+    season = Path("/lib/Show/Season 01")
+    entries = [season / "Show - S02E05 - Tail.mkv"]
+    plan = core.build_plan(season_dir=season, entries=entries,
+                           show_name="Show", year=None, season=1)
+    assert plan.ok                                    # never blocks
+    assert any("named S02" in n for n in plan.notes)
+
+
+def test_changing_the_show_name_rewrites_episodic_files_too():
+    season = Path("/lib/Show/Season 01")
+    entries = [season / "Show - S01E01 - Tail.mkv"]
+    plan = core.build_plan(season_dir=season, entries=entries,
+                           show_name="Better Name", year="2019", season=1)
+    assert plan.files[0].target_name == "Better Name (2019) - S01E01 - Tail.mkv"
+
+
+@pytest.mark.parametrize("name", [
+    # All real, all previously "tidied" into a different name by mistake.
+    "Ally McBeal - S05E01 - .avi",                       # dangling separator
+    "Beverly Hills, 90210 - S02E14 - The Next Fifty Years .avi",   # trailing space
+    "Battlestar Galactica - S04E01 - He That Believeth in Me  (1080p).mkv",  # double space
+])
+def test_untidy_real_names_are_preserved_not_cleaned_up(name):
+    """Trailing spaces and dangling separators are left exactly as found. They
+    look like defects, but 'fixing' them renames files nobody asked about."""
+    p = Path("/s/" + name)
+    f = core.classify(p)
+    head, year, _, _ = core.parse_show_dir(name.split(" - S")[0])
+    assert core.build_target_name(head, year, f.season, f.episode,
+                                  f.tail_raw, p.suffix) == name
+
+
+def test_defaults_follow_the_files_when_the_folder_disagrees(tmp_path):
+    """'Battlestar Galactica (2003)' full of 'Battlestar Galactica - S04E01…'
+    must open as a no-op, not propose adding the year to all 84 files."""
+    season = tmp_path / "Battlestar Galactica (2003)" / "Season 04"
+    season.mkdir(parents=True)
+    for n in (1, 2):
+        (season / "Battlestar Galactica - S04E0{} - x265.mkv".format(n)).touch()
+
+    d = core.derive_defaults(season, sorted(season.iterdir()))
+    assert d.show_name == "Battlestar Galactica"
+    assert d.year is None                       # the files carry no year
+
+    plan = core.build_plan(season_dir=season, entries=sorted(season.iterdir()),
+                           show_name=d.show_name, year=d.year, season=d.season)
+    assert plan.moves == []
+
+
+def test_the_folder_still_wins_when_the_files_disagree_with_each_other(tmp_path):
+    season = tmp_path / "Real Name (2001)" / "Season 01"
+    season.mkdir(parents=True)
+    (season / "One Name - S01E01 - a.mkv").touch()
+    (season / "Other Name - S01E02 - b.mkv").touch()
+    d = core.derive_defaults(season, sorted(season.iterdir()))
+    assert (d.show_name, d.year) == ("Real Name", "2001")

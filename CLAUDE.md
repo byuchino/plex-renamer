@@ -73,12 +73,19 @@ runtime annotations. Syntax-check before deploying:
 
 ## The running preview
 
-A read-only preview runs on the VM from `~/plex-renamer-preview/` on port 8101, still
-carrying **Phase 2 code**. It is **not** the Phase 4 install: hand-started, no systemd,
-dies on reboot. Copying the current `app.py` there would put a live Rename button on an
-unauthenticated LAN page pointed at the real library, before the scratch-copy proof —
-that is a decision to make deliberately, not a redeploy. `execute.py` must be copied too
-or the app will not import. To redeploy:
+A preview runs on the VM from `~/plex-renamer-preview/` on port 8101. Since 2026-08-17 it
+carries **Phase 3 code, so its Rename button is live against the real library** — the user
+asked for that deliberately, ahead of the scratch-copy proof. It is still **not** the
+Phase 4 install: hand-started, no systemd, dies on reboot. `execute.py` must be copied
+alongside `app.py` or the import fails. Its `undo_dir` is
+`/home/brian/plex-renamer-preview/undo` (created on the first real run), not the
+`/var/lib` default — an unwritable `undo_dir` refuses every execute, which is safe but
+looks like a bug.
+
+**Restarting it needs `setsid` and separate steps.** `kill` + start in one compound ssh
+command gets blocked, and the start command holds the ssh channel open even with `nohup`
+— the server is already up and detached, so just stop waiting on that shell and verify
+with `ss` from a second connection. To redeploy:
 
     scp -q app.py core.py config.py execute.py handbrake-vm:~/plex-renamer-preview/
     scp -q templates/index.html handbrake-vm:~/plex-renamer-preview/templates/

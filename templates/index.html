@@ -376,7 +376,26 @@ async function browse(path) {
   const url = path ? "/api/browse?path=" + encodeURIComponent(path) : "/api/browse";
   const res = await fetch(url);
   const data = await res.json();
-  if (data.error) { document.getElementById("crumbs").textContent = data.error; return; }
+  if (data.error) {
+    // Always leave a way out. A '#path=' deep link outlives the folder it
+    // points at — a renamed show, a removed season, or an NFS mount that has
+    // not come back — and replacing the whole breadcrumb with the error text
+    // took the 'roots' button with it, stranding the page on a URL that can
+    // only be escaped by editing it by hand.
+    const crumbs = document.getElementById("crumbs");
+    crumbs.innerHTML = '<button class="crumb" data-path="">roots</button>' +
+      '<span class="sep">&rsaquo;</span><span class="issue">' + esc(data.error) + "</span>";
+    crumbs.querySelector("button.crumb").onclick = function () { open(null); };
+    // Deliberately does NOT bounce to the roots by itself: if a library is
+    // missing because its mount is absent, silently showing the roots makes an
+    // unmounted NFS share look like an empty library.
+    state.dirs = [];
+    state.path = null;
+    renderDirs();
+    document.getElementById("filter-bar").style.display = "none";
+    document.getElementById("planner").style.display = "none";
+    return;
+  }
 
   // Breadcrumb, every ancestor clickable back to the root list — which is
   // also how you get back out of a root to reach the other library.

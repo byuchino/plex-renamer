@@ -664,3 +664,15 @@ def test_the_history_section_is_outside_the_planner():
     history = html.index('<section id="history-section">')
     # the planner div closes before the history section begins
     assert html.index('<div class="overlay"', planner) > history > planner
+
+
+def test_a_browse_error_still_offers_a_way_back_to_the_roots():
+    """A '#path=' deep link outlives the folder it points at — a renamed show, a
+    deleted season, an NFS mount that has not come back. The error handler used
+    to replace the whole breadcrumb with the message, taking the 'roots' button
+    with it and leaving the page escapable only by editing the URL."""
+    script = _page_script()
+    handler = script[script.index("if (data.error) {"):]
+    handler = handler[:handler.index("state.dirs = data.dirs")]
+    assert 'data-path=""' in handler, "the error path renders no roots button"
+    assert "open(null)" in handler, "the roots button is not wired"

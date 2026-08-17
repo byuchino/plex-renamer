@@ -282,8 +282,20 @@ remote-mount failure mode.
 **Its output does, though.** A move into a different season folder — the tool's primary
 operation — is not propagated as a move: the remote deletes the old folder and re-uploads
 every file. Measured on the first real run, 4.6 GB across the tunnel to renumber ten
-recordings. A rename *within* one directory does propagate as a true rename. Neither is a
-correctness problem; it is a bandwidth cost to budget for before a bulk run.
+recordings. Measured again with a 64 MB probe, reading the inode on the receiving side:
+
+| Operation | Remote inode | Settled | |
+|---|---|---|---|
+| Rename a file within a directory | preserved | 12 s | true rename |
+| Rename the directory itself | preserved | 18 s | true rename |
+| Move a file across directories | changed | 49 s | delete + re-upload |
+
+(A fresh 64 MB upload takes 57 s, so 49 s is a full re-transfer.) None of this is a
+correctness problem — the plan, the manifest and undo are unaffected. It is a bandwidth
+cost, and an avoidable one: a `Season YYYY` folder whose files all land in one season
+could be handled by **renaming the folder** rather than moving the files out of it.
+That would have to be a narrow special case of the move-don't-rename rule above — it is
+only safe when every file goes to the same season — and it is **not built**.
 
 They are still **separate NFS exports** (`TV Shows` and `Videos` are exported
 independently, `st_dev` 40 and 41), so `os.rename` between the two roots fails with

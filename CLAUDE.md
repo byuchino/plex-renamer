@@ -228,14 +228,30 @@ episode will probably cost its watched flag; that is a known price.
   season folder. Budget the transfer before a bulk run on a large folder, and prefer
   doing them when the tunnel is not otherwise busy.
 
-  Untested mitigation, if the cost ever justifies it: when every file in a `Season YYYY`
-  folder lands in one season, **rename the folder** instead of moving the files, and see
-  whether the sync treats a directory rename natively. README rejected folder-renaming
-  outright so that one year folder can be split across seasons — this would have to be a
-  narrow special case, not a change to the general rule. Nobody has measured whether the
-  sync handles a directory rename any better than a file move, so measure first.
+  **Measured 2026-08-17** with a 64 MB probe in `/mnt/bama/volume1/Videos/`, reading the
+  inode on the receiving side via the VM's `/mnt/pippa` mount of the condo NAS:
 
-  Sync is two-way. It does **not** propagate POSIX permissions.
+  | Operation | Remote inode | Settled in | Verdict |
+  |---|---|---|---|
+  | Rename file **within** a directory | preserved | 12 s | true rename |
+  | Rename the **directory** itself | **preserved** | 18 s | **true rename** |
+  | Move file **across** directories | changed | 49 s | delete + re-upload |
+
+  Baseline upload of the same 64 MB was 57 s, so 49 s is a full re-transfer and 12–18 s
+  is metadata only. The three cases are directly comparable and the signal is
+  unambiguous.
+
+  **So the mitigation works and is worth building.** A `Season YYYY` folder whose files
+  all land in one season should be handled by **renaming the folder** — cheap — instead of
+  creating `Season 01`, moving every file into it, and removing the emptied original,
+  which is what costs 4.6 GB. Files can then be renamed in place inside it, also cheap.
+  README rejected folder-renaming outright so that one year folder can be split across
+  seasons; this has to stay a **narrow special case** (year-fallback form, every file
+  going to the same season, source folder would be emptied and removed anyway), not a
+  change to the general rule. Not built yet.
+
+  Sync is two-way, is event-driven and quick to react, and does **not** propagate POSIX
+  permissions.
 - **Do not restart the transcode services** (`transcode-watcher`) casually — it kills any
   in-progress local encode. That project is a separate repo at `/home/brian/handbrake`;
   this tool never touches its `jobs.db`.

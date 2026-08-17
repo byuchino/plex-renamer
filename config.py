@@ -21,6 +21,11 @@ class Config:
     bind_host: str = "0.0.0.0"
     bind_port: int = 8101
     undo_dir: Path = Path("/var/lib/plex-renamer/undo")
+    # How many run manifests to keep. They are the undo records *and* the
+    # activity history, so this is how far back both reach. ~3 KB each, so the
+    # default is generous enough to be effectively "everything" at a few runs a
+    # week; 0 disables pruning entirely.
+    keep_runs: int = 200
 
 
 class OutsideRoots(ValueError):
@@ -42,6 +47,7 @@ def load_config(path: str = None) -> Config:
         bind_port=cp.getint("server", "bind_port", fallback=8101),
         undo_dir=Path(cp.get("general", "undo_dir",
                              fallback="/var/lib/plex-renamer/undo")),
+        keep_runs=cp.getint("general", "keep_runs", fallback=200),
     )
 
 

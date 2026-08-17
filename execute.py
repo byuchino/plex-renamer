@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import binascii
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass, field
@@ -34,7 +35,13 @@ from typing import Any, Dict, List, Optional, Sequence
 import core
 from config import OutsideRoots, resolve_within_roots
 
+# Bumped only for a change that an older reader could misinterpret. `inputs`
+# was added to the body afterwards and is simply absent from earlier manifests,
+# which stay readable and undoable — losing the undo record for a run that
+# already happened would be a real cost for a cosmetic gain.
 MANIFEST_VERSION = 1
+
+log = logging.getLogger(__name__)
 
 OP_MKDIR = "mkdir"       # a season folder this run created
 OP_MOVE = "move"         # a file rename
@@ -309,28 +316,42 @@ def _write_manifest(path: Path, body: Dict[str, Any]) -> None:
 
 
 def _manifest_body(plan: core.Plan, ops: Sequence[Operation],
-                   season_dir: Optional[Path]) -> Dict[str, Any]:
+                   season_dir: Optional[Path],
+                   inputs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The manifest is both the undo record and the activity history, so it
+    carries the inputs the run was made with. Without them a past run is a list
+    of paths with no way to tell what was asked for."""
     return {
         "version": MANIFEST_VERSION,
         "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "fingerprint": plan.fingerprint(),
         "season_dir": str(season_dir) if season_dir else None,
+        "inputs": dict(inputs or {}),
         "undone": False,
         "operations": [o.to_json() for o in ops],
     }
 
 
 def execute_plan(plan: core.Plan, roots: Sequence[Path], undo_dir: Path,
-                 now: Optional[float] = None) -> Result:
+                 now: Optional[float] = None,
+                 inputs: Optional[Dict[str, Any]] = None,
+                 keep_runs: int = 0) -> Result:
     """Apply a plan. The only entry point that moves a real file.
 
     Refuses without touching anything if pre-flight finds a problem or the undo
     manifest cannot be written. Past that point it keeps going and reports per
     operation: a failure on one file is not a reason to leave the rest of a
     season half-renamed under two conventions.
+
+    A refusal is logged and leaves no manifest, deliberately: 'a manifest
+    exists' has to keep meaning 'something happened', which is what undo and
+    the history list both read it as. The log is where refusals live, and it is
+    the only place they can be debugged from.
     """
     problems = preflight(plan, roots)
     if problems:
+        log.warning("execute REFUSED for %s: %s",
+                    plan.season_dir_target, "; ".join(problems))
         return Result(refused=problems)
 
     ops = plan_operations(plan)
@@ -343,12 +364,17 @@ def execute_plan(plan: core.Plan, roots: Sequence[Path], undo_dir: Path,
         Path(undo_dir).mkdir(parents=True, exist_ok=True)
         manifest_name = _manifest_name(plan.fingerprint(), undo_dir, now)
         manifest_path = Path(undo_dir) / manifest_name
-        _write_manifest(manifest_path, _manifest_body(plan, ops, source_season))
+        _write_manifest(manifest_path,
+                        _manifest_body(plan, ops, source_season, inputs))
     except OSError as e:
+        log.error("execute REFUSED for %s: no undo manifest (%s)",
+                  source_season, e)
         return Result(refused=[
             "Could not write the undo manifest to {} ({}). Nothing was "
             "renamed.".format(Path(undo_dir) / (manifest_name or ""), e)])
 
+    log.info("execute START %s -> %s: %d operation(s), manifest %s",
+             source_season, plan.season_dir_target, len(ops), manifest_name)
     for op in ops:
         _apply(op)
 
@@ -360,10 +386,55 @@ def execute_plan(plan: core.Plan, roots: Sequence[Path], undo_dir: Path,
     # crash before this leaves the planned log in place, which undo treats as
     # 'try each op and skip whatever is not there'.
     try:
-        _write_manifest(manifest_path, _manifest_body(plan, ops, source_season))
+        _write_manifest(manifest_path,
+                        _manifest_body(plan, ops, source_season, inputs))
     except OSError:
         pass
+    _log_ops("execute", result)
+    prune_runs(undo_dir, keep_runs)
     return result
+
+
+def _log_ops(what: str, result: Result) -> None:
+    """One summary line, plus a line per failure. Failures are logged
+    individually because 'nine of ten applied' is not debuggable on its own."""
+    log.info("%s DONE %s: %d/%d applied%s", what, result.season_dir,
+             result.applied_count, len(result.ops),
+             "" if result.ok else ", WITH ERRORS")
+    for op in result.ops:
+        if op.error:
+            log.warning("%s FAILED %s: %s -> %s: %s", what, op.op,
+                        op.src, op.dst, op.error)
+
+
+def prune_runs(undo_dir: Path, keep: int) -> List[str]:
+    """Drop the oldest manifests beyond `keep`, returning what was removed.
+
+    Manifest names begin with a sortable UTC timestamp, so oldest-first is a
+    plain name sort. Pruning is strictly by age and ignores whether a run was
+    undone: once a run is `keep` runs old, offering to reverse it is a worse
+    idea than forgetting it. 0 disables pruning.
+
+    Never allowed to break a run that already succeeded — the files are already
+    moved and the manifest is already written by the time this is called.
+    """
+    if keep <= 0:
+        return []
+    try:
+        names = sorted(p.name for p in Path(undo_dir).iterdir()
+                       if p.is_file() and p.name.endswith(".json"))
+    except OSError:
+        return []
+    removed: List[str] = []
+    for name in names[:-keep] if len(names) > keep else []:
+        try:
+            (Path(undo_dir) / name).unlink()
+            removed.append(name)
+        except OSError:
+            pass
+    if removed:
+        log.info("pruned %d old manifest(s), keeping %d", len(removed), keep)
+    return removed
 
 
 def _apply(op: Operation) -> None:
@@ -396,6 +467,94 @@ def _apply(op: Operation) -> None:
         op.applied = True
     except OSError as e:
         op.error = str(e)
+
+
+# ── History ────────────────────────────────────────────────────────────────
+
+@dataclass
+class RunSummary:
+    """One past run, for the history list.
+
+    Built from the manifest, which is written before the first move — so the
+    history is not a second record that could disagree with the undo record.
+    It is the undo record, read back.
+    """
+    manifest: str
+    created: Optional[str] = None
+    season_dir: Optional[str] = None
+    fingerprint: Optional[str] = None
+    inputs: Dict[str, Any] = field(default_factory=dict)
+    renames: int = 0
+    applied: int = 0
+    total: int = 0
+    errors: int = 0
+    undone: bool = False
+    undone_at: Optional[str] = None
+
+    @property
+    def undoable(self) -> bool:
+        return not self.undone and self.applied > 0
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "manifest": self.manifest,
+            "created": self.created,
+            "season_dir": self.season_dir,
+            "fingerprint": self.fingerprint,
+            "inputs": self.inputs,
+            "renames": self.renames,
+            "applied": self.applied,
+            "total": self.total,
+            "errors": self.errors,
+            "undone": self.undone,
+            "undone_at": self.undone_at,
+            "undoable": self.undoable,
+        }
+
+
+def summarise_manifest(name: str, body: Dict[str, Any]) -> RunSummary:
+    ops = [o for o in (body.get("operations") or []) if isinstance(o, dict)]
+    return RunSummary(
+        manifest=name,
+        created=body.get("created"),
+        season_dir=body.get("season_dir"),
+        fingerprint=body.get("fingerprint"),
+        inputs=body.get("inputs") or {},
+        # What the user thinks of as 'files renamed', as opposed to the mkdir
+        # and rmdir bookkeeping around it.
+        renames=sum(1 for o in ops if o.get("op") == OP_MOVE and o.get("applied")),
+        applied=sum(1 for o in ops if o.get("applied")),
+        total=len(ops),
+        errors=sum(1 for o in ops if o.get("error")),
+        undone=bool(body.get("undone")),
+        undone_at=body.get("undone_at"),
+    )
+
+
+def list_runs(undo_dir: Path, limit: int = 50) -> List[RunSummary]:
+    """Every run still on disk, newest first.
+
+    A manifest that cannot be read is skipped rather than raised: one corrupt
+    file must not take the whole history page down, which is exactly when you
+    would be looking at it.
+    """
+    try:
+        names = sorted((p.name for p in Path(undo_dir).iterdir()
+                        if p.is_file() and p.name.endswith(".json")),
+                       reverse=True)
+    except OSError:
+        return []
+    out: List[RunSummary] = []
+    for name in names:
+        if len(out) >= limit:
+            break
+        try:
+            body = load_manifest(name, undo_dir)
+        except ManifestError as e:
+            log.warning("skipping unreadable manifest %s: %s", name, e)
+            continue
+        out.append(summarise_manifest(name, body))
+    return out
 
 
 # ── Undo ───────────────────────────────────────────────────────────────────
@@ -435,12 +594,14 @@ def undo(name: str, undo_dir: Path, roots: Sequence[Path]) -> Result:
     """
     body = load_manifest(name, undo_dir)
     if body.get("undone"):
+        log.warning("undo REFUSED %s: already undone", name)
         return Result(refused=["{} has already been undone.".format(name)],
                       manifest=name)
 
     ops = [Operation.from_json(d) for d in (body.get("operations") or [])]
     applied = [o for o in ops if o.applied]
     if not applied:
+        log.warning("undo REFUSED %s: no completed changes recorded", name)
         return Result(refused=["{} recorded no completed changes.".format(name)],
                       manifest=name)
 
@@ -453,8 +614,10 @@ def undo(name: str, undo_dir: Path, roots: Sequence[Path]) -> Result:
             try:
                 resolve_within_roots(raw, roots)
             except OutsideRoots as e:
+                log.warning("undo REFUSED %s: %s", name, e)
                 return Result(refused=[str(e)], manifest=name)
 
+    log.info("undo START %s: reversing %d operation(s)", name, len(applied))
     reversed_ops: List[Operation] = []
     for op in reversed(applied):
         if op.op in (OP_MOVE, OP_MOVE_DIR):
@@ -475,6 +638,7 @@ def undo(name: str, undo_dir: Path, roots: Sequence[Path]) -> Result:
     season = body.get("season_dir")
     result.season_dir = season
     result.show_dir = str(Path(season).parent) if season else None
+    _log_ops("undo", result)
     if result.ok:
         body["undone"] = True
         body["undone_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

@@ -150,6 +150,31 @@
   .pair.failed .to::before { content: "×  "; color: var(--bad); }
   .pair .why { color: var(--bad); }
   .pair .op { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: .04em; }
+  /* History. Lives outside #planner so a past run is reachable without
+     navigating to the folder it touched — which is the only way to undo one
+     after the result dialog is closed. */
+  .run { border-bottom: 1px solid var(--border); }
+  .run:last-child { border-bottom: none; }
+  .run-head {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    padding: 8px 14px; background: none; border: none; color: var(--text);
+    font-family: inherit; font-size: 13px; text-align: left; cursor: pointer;
+  }
+  .run-head:hover { background: rgba(59,130,246,.08); }
+  .run-when { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .run-what { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .run-ops { display: none; background: #11131a; }
+  .run.open .run-ops { display: block; }
+  .twist { display: inline-block; color: var(--muted); transition: transform .12s; }
+  .run.open .twist { transform: rotate(90deg); }
+  .run-undo {
+    background: transparent; border: 1px solid var(--border); color: var(--muted);
+    padding: 3px 9px; border-radius: 6px; font-size: 12px; cursor: pointer;
+    font-family: inherit; white-space: nowrap;
+  }
+  .run-undo:hover { color: var(--text); border-color: var(--warn); }
+  .badge.muted { background: rgba(139,147,167,.2); color: var(--muted); }
+
   .banner { padding: 12px 14px; border-bottom: 1px solid var(--border); }
   .banner.bad { color: var(--bad); }
   .banner.ok { color: var(--ok); }
@@ -247,6 +272,12 @@
     <div class="pad note">Plan fingerprint <span class="mono" id="fingerprint">—</span></div>
   </section>
 </div>
+
+<section id="history-section">
+  <h2>History</h2>
+  <div id="history"></div>
+  <div class="pad note" id="history-foot">Loading…</div>
+</section>
 
 <div class="overlay" id="overlay"></div>
 <div class="modal" id="modal">
@@ -425,7 +456,8 @@ function open(path) {
   }
 }
 
-window.onhashchange = function () { browse(hashPath()); };
+window.onhashchange = function () { browse(hashPath());
+loadRuns(); };
 
 // ── Planning ───────────────────────────────────────────────────────────────
 
@@ -652,6 +684,7 @@ async function doExecute() {
   go.disabled = false;
   go.textContent = "Rename these files";
   showResult("Rename", body);
+  loadRuns();
 }
 
 function showResult(what, body) {
@@ -698,27 +731,142 @@ function showResult(what, body) {
   showModal("result");
 }
 
-async function doUndo() {
-  if (!state.manifest) return;
-  const btn = document.getElementById("result-undo");
-  btn.disabled = true;
-  btn.textContent = "Undoing…";
+async function undoManifest(name) {
   state.busy = true;
   let body;
   try {
     const res = await fetch("/api/undo", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ manifest: state.manifest }),
+      body: JSON.stringify({ manifest: name }),
     });
     body = await res.json();
   } catch (e) {
     body = { error: String(e) };
   }
   state.busy = false;
+  showResult("Undo", body);
+  loadRuns();
+  return body;
+}
+
+async function doUndo() {
+  if (!state.manifest) return;
+  const btn = document.getElementById("result-undo");
+  btn.disabled = true;
+  btn.textContent = "Undoing…";
+  await undoManifest(state.manifest);
   btn.disabled = false;
   btn.textContent = "Undo this run";
-  showResult("Undo", body);
+}
+
+// ── History ────────────────────────────────────────────────────────────────
+
+// The last two path components: the show folder and the season, which is what
+// identifies a run at a glance. The full path is in the expanded detail.
+function tailPath(p) {
+  const parts = String(p || "").split("/").filter(Boolean);
+  return parts.slice(-2).join("/") || "(unknown folder)";
+}
+
+function whenText(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);              // the manifest stamps UTC with a Z
+  return isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+function runBadge(r) {
+  if (r.undone) return '<span class="badge muted">undone</span>';
+  if (r.errors) return '<span class="badge bad">' + r.errors + " failed</span>";
+  return '<span class="badge ok">applied</span>';
+}
+
+async function loadRuns() {
+  let data;
+  try {
+    const res = await fetch("/api/runs");
+    data = await res.json();
+  } catch (e) {
+    document.getElementById("history-foot").textContent = String(e);
+    return;
+  }
+  const runs = data.runs || [];
+  const box = document.getElementById("history");
+  box.innerHTML = runs.map(function (r) {
+    const what = r.renames + " file" + (r.renames === 1 ? "" : "s") +
+                 " · " + esc(tailPath(r.season_dir));
+    return '<div class="run" data-manifest="' + esc(r.manifest) + '">' +
+      '<button class="run-head">' +
+        '<span class="twist">&rsaquo;</span>' +
+        '<span class="run-when">' + esc(whenText(r.created)) + "</span>" +
+        '<span class="run-what mono">' + what + "</span>" +
+        runBadge(r) +
+        (r.undoable
+          ? '<span class="run-undo" data-undo="' + esc(r.manifest) + '">Undo</span>'
+          : "") +
+      "</button>" +
+      '<div class="run-ops"><div class="pad note">Loading…</div></div>' +
+      "</div>";
+  }).join("");
+
+  box.querySelectorAll(".run-head").forEach(function (head) {
+    head.onclick = function (ev) {
+      const undo = ev.target.closest("[data-undo]");
+      if (undo) {                       // the Undo pill sits inside the row
+        ev.stopPropagation();
+        undoManifest(undo.dataset.undo);
+        return;
+      }
+      const run = head.closest(".run");
+      run.classList.toggle("open");
+      if (run.classList.contains("open")) loadRunDetail(run);
+    };
+  });
+
+  document.getElementById("history-foot").textContent = runs.length
+    ? runs.length + " run(s) · the newest " + data.keep_runs + " are kept"
+    : "No runs yet. Every rename writes one, before it moves anything.";
+}
+
+async function loadRunDetail(run) {
+  if (run.dataset.loaded) return;       // fetched once, then cached in the DOM
+  const box = run.querySelector(".run-ops");
+  let d;
+  try {
+    const res = await fetch("/api/runs/" + encodeURIComponent(run.dataset.manifest));
+    d = await res.json();
+  } catch (e) {
+    box.innerHTML = '<div class="pad issue">' + esc(String(e)) + "</div>";
+    return;
+  }
+  if (d.error) {
+    box.innerHTML = '<div class="pad issue">' + esc(d.error) + "</div>";
+    return;
+  }
+  const inp = d.inputs || {};
+  const bits = [];
+  if (inp.show_name) bits.push("show " + inp.show_name);
+  if (inp.year) bits.push("year " + inp.year);
+  if (inp.season !== undefined && inp.season !== null) bits.push("season " + inp.season);
+  if (inp.per_episode && inp.per_episode > 1) bits.push(inp.per_episode + " airings/episode");
+  if (inp.rename_show_dir) bits.push("show folder renamed");
+
+  box.innerHTML =
+    '<div class="pad note">' + esc(d.season_dir || "") +
+      (bits.length ? "<br>" + esc(bits.join(" · ")) : "") +
+      "<br>plan " + esc(d.fingerprint || "?") + " · manifest " + esc(d.manifest) +
+      (d.undone_at ? " · undone " + esc(whenText(d.undone_at)) : "") +
+    "</div>" +
+    (d.operations || []).map(function (o) {
+      // Not-applied without an error is a deliberate skip — the rmdir that
+      // found the folder still had something in it. Not a failure, not red.
+      const label = (o.op === "move" ? "" : o.op) +
+                    (!o.applied && !o.error ? " (skipped)" : "");
+      const from = o.from || o.to || "";
+      const to = o.from ? o.to : "";
+      return pairRow(from, to, o.error || "", label.trim());
+    }).join("");
+  run.dataset.loaded = "1";
 }
 
 // ── Wiring ─────────────────────────────────────────────────────────────────

@@ -548,3 +548,82 @@ def test_executing_a_clean_specials_folder_is_refused(specials_client, specials_
     assert code == 409
     assert any("Nothing to rename" in r for r in data["refused"])
     assert sorted(p.name for p in season.iterdir()) == before
+
+
+# ── History routes ─────────────────────────────────────────────────────────
+
+def test_runs_is_empty_before_anything_has_happened(client):
+    data = client.get("/api/runs").get_json()
+    assert data["runs"] == []
+    assert data["keep_runs"] == 200
+
+
+def test_a_run_shows_up_in_the_history_with_its_inputs(client, library):
+    _, season = library
+    _, plan = get_plan(client, path=str(season), season=4, per_episode=2)
+    _, run = execute_run(client, path=str(season), season=4, per_episode=2,
+                         fingerprint=plan["fingerprint"])
+
+    data = client.get("/api/runs").get_json()
+    assert len(data["runs"]) == 1
+    r = data["runs"][0]
+    assert r["manifest"] == run["manifest"]
+    assert r["renames"] == len(TIMECODES)
+    assert r["errors"] == 0
+    assert r["undone"] is False
+    assert r["undoable"] is True
+    assert r["inputs"]["season"] == 4
+    assert r["inputs"]["per_episode"] == 2
+    assert r["season_dir"] == str(season)
+
+
+def test_run_detail_carries_every_operation(client, library):
+    _, season = library
+    _, plan = get_plan(client, path=str(season))
+    _, run = execute_run(client, path=str(season), fingerprint=plan["fingerprint"])
+
+    d = client.get("/api/runs/" + run["manifest"]).get_json()
+    assert [o["op"] for o in d["operations"]] == \
+        ["mkdir"] + ["move"] * len(TIMECODES) + ["rmdir"]
+    assert all(o["applied"] for o in d["operations"][:-1])
+    assert d["fingerprint"] == plan["fingerprint"]
+
+
+def test_the_history_is_global_not_scoped_to_the_browsed_folder(client, library):
+    """The point of it: reach a run after navigating away, which is the only
+    way to undo one once the result dialog is closed."""
+    _, season = library
+    _, plan = get_plan(client, path=str(season))
+    _, run = execute_run(client, path=str(season), fingerprint=plan["fingerprint"])
+    # the recordings have left the folder the run started in (poster.jpg keeps
+    # the folder itself alive, so it is the files that prove the move)
+    assert [p.name for p in season.iterdir()] == ["poster.jpg"]
+    assert client.get("/api/runs").get_json()["runs"][0]["manifest"] == run["manifest"]
+
+    res = client.post("/api/undo", json={"manifest": run["manifest"]})
+    assert res.status_code == 200
+    assert len(list(season.iterdir())) == len(TIMECODES) + 1
+    after = client.get("/api/runs").get_json()["runs"][0]
+    assert (after["undone"], after["undoable"]) == (True, False)
+
+
+@pytest.mark.parametrize("name", ["../../../etc/passwd", "nope.json", "x.txt"])
+def test_run_detail_will_not_read_anything_else(client, name):
+    assert client.get("/api/runs/" + name).status_code == 404
+
+
+def test_runs_rejects_a_non_numeric_limit(client):
+    assert client.get("/api/runs", query_string={"limit": "lots"}).status_code == 400
+
+
+def test_a_refused_run_leaves_no_history_entry(client, library):
+    """Refusals live in the log, not on disk: 'a manifest exists' has to keep
+    meaning 'something happened'."""
+    _, season = library
+    first = "Nagatan and Aoto (2026) - {}.mp4".format(TIMECODES[0])
+    overrides = {first: "Renamed.mkv"}
+    _, plan = get_plan(client, path=str(season), name_overrides=overrides)
+    code, _ = execute_run(client, path=str(season), name_overrides=overrides,
+                          fingerprint=plan["fingerprint"])
+    assert code == 409
+    assert client.get("/api/runs").get_json()["runs"] == []

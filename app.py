@@ -13,6 +13,7 @@ Targets Python 3.8 (the deployment VM).
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -26,6 +27,15 @@ from config import Config, OutsideRoots, load_config, resolve_within_roots
 # '@eaDir' and '#recycle' are both Synology's, and both show up in these
 # libraries alongside the real folders.
 HIDDEN_DIR_PREFIXES = (".", "@", "#")
+
+log = logging.getLogger(__name__)
+
+# /api/plan is called on every keystroke, so it is logged at DEBUG and off by
+# default — an INFO line per keystroke would bury the lines that matter.
+# Everything that changes the library, or refuses to, is logged by execute.py.
+
+# How many past runs the history list returns by default.
+RUNS_LIMIT = 50
 
 
 def _error(message: str, code: int = 400):
@@ -308,17 +318,25 @@ def create_app(config: Optional[Config] = None) -> Flask:
         if not confirmed:
             return _error("missing plan fingerprint")
         try:
-            _dir, _defaults, _inputs, plan = _plan_from_payload(cfg, payload)
+            season_dir, _defaults, inputs, plan = _plan_from_payload(cfg, payload)
         except BadRequest as e:
             return _error(e.message, e.code)
         if plan.fingerprint() != confirmed:
+            # Logged here rather than in execute.py, which never sees this: the
+            # plan was rebuilt and no longer matches what the user agreed to.
+            log.warning("execute REFUSED for %s: fingerprint %s was confirmed, "
+                        "plan is now %s", season_dir, confirmed,
+                        plan.fingerprint())
             return jsonify({
                 "error": "This folder changed since the plan was confirmed. "
                          "Nothing was renamed — review the new plan and try again.",
                 "fingerprint": plan.fingerprint(),
             }), 409
 
-        result = execute.execute_plan(plan, cfg.roots, cfg.undo_dir)
+        # inputs go into the manifest so a run in the history can be explained
+        # later, not just replayed as a list of paths.
+        result = execute.execute_plan(plan, cfg.roots, cfg.undo_dir,
+                                      inputs=inputs, keep_runs=cfg.keep_runs)
         # 409 is 'refused, nothing touched'. A run that started and hit a
         # per-file error is a 200 carrying its own report: the caller needs the
         # detail, not a status code.
@@ -336,11 +354,52 @@ def create_app(config: Optional[Config] = None) -> Flask:
             return _error(str(e), 404)
         return jsonify(result.to_json()), (409 if result.refused else 200)
 
+    @app.route("/api/runs")
+    def runs():
+        """Every run still on disk, newest first.
+
+        Deliberately not scoped to the folder being browsed: the point of the
+        history is to reach a run you have navigated away from, which is the
+        only way to undo one after closing the result dialog.
+        """
+        try:
+            limit = int(request.args.get("limit", RUNS_LIMIT))
+        except (TypeError, ValueError):
+            return _error("limit must be a whole number")
+        runs = execute.list_runs(cfg.undo_dir, max(1, min(limit, 500)))
+        return jsonify({
+            "runs": [r.to_json() for r in runs],
+            "keep_runs": cfg.keep_runs,
+        })
+
+    @app.route("/api/runs/<name>")
+    def run_detail(name):
+        """One run in full, including every operation and its outcome.
+
+        The list stays light and the detail is fetched on expand; a hundred runs
+        of sixty files each is not a payload worth sending to draw one row.
+        """
+        try:
+            body = execute.load_manifest(name, cfg.undo_dir)
+        except execute.ManifestError as e:
+            return _error(str(e), 404)
+        summary = execute.summarise_manifest(name, body)
+        out = summary.to_json()
+        out["operations"] = body.get("operations") or []
+        return jsonify(out)
+
     return app
 
 
 def main() -> None:
     cfg = load_config()
+    # Logging goes to stderr and nowhere else. Under Phase 4's systemd unit
+    # journald owns persistence and rotation; owning a log file here would mean
+    # owning rotation too, and would put file writing into this module, which
+    # test_no_module_can_mutate_the_filesystem exists to prevent.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     create_app(cfg).run(host=cfg.bind_host, port=cfg.bind_port, threaded=True)
 
 

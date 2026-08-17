@@ -441,3 +441,139 @@ def test_no_probe_files_survive_a_run(tree, undo_dir):
     execute.execute_plan(make_plan(season), [root], undo_dir)
     strays = [str(p.relative_to(root)) for p in root.rglob(".plex-renamer-write-probe-*")]
     assert strays == []
+
+
+# ── History and retention ──────────────────────────────────────────────────
+
+def test_a_run_records_the_inputs_it_was_made_with(tree, undo_dir):
+    """A history entry has to be explicable, not just replayable."""
+    root, season = tree
+    inputs = {"show_name": "Nagatan and Aoto", "year": "2026", "season": 1,
+              "per_episode": 2, "rename_show_dir": False}
+    result = execute.execute_plan(make_plan(season, per_episode=2), [root],
+                                 undo_dir, inputs=inputs)
+    body = json.loads((undo_dir / result.manifest).read_text())
+    assert body["inputs"] == inputs
+
+
+def test_list_runs_is_newest_first_and_summarises(tree, undo_dir):
+    root, season = tree
+    first = execute.execute_plan(make_plan(season), [root], undo_dir, now=0)
+    execute.undo(first.manifest, undo_dir, [root])
+    second = execute.execute_plan(make_plan(season), [root], undo_dir, now=86400)
+
+    runs = execute.list_runs(undo_dir)
+    assert [r.manifest for r in runs] == [second.manifest, first.manifest]
+    now, before = runs
+    assert now.renames == len(TIMECODES)      # moves only, not the mkdir/rmdir
+    assert now.total == len(TIMECODES) + 2    # + mkdir + rmdir
+    assert now.errors == 0
+    assert (now.undone, now.undoable) == (False, True)
+    assert (before.undone, before.undoable) == (True, False)
+    assert before.undone_at
+    assert now.season_dir == str(season)
+
+
+def test_list_runs_of_an_empty_or_missing_dir_is_empty(tmp_path):
+    assert execute.list_runs(tmp_path / "nope") == []
+    (tmp_path / "empty").mkdir()
+    assert execute.list_runs(tmp_path / "empty") == []
+
+
+def test_one_corrupt_manifest_does_not_take_the_history_down(tree, undo_dir):
+    """The history is exactly what you would be reading when something is
+    wrong, so a bad file is skipped rather than raised."""
+    root, season = tree
+    good = execute.execute_plan(make_plan(season), [root], undo_dir)
+    (undo_dir / "20990101T000000Z-garbage.json").write_text("{not json")
+    (undo_dir / "20990102T000000Z-wrongver.json").write_text('{"version": 99}')
+
+    runs = execute.list_runs(undo_dir)
+    assert [r.manifest for r in runs] == [good.manifest]
+
+
+def test_list_runs_honours_a_limit(tree, undo_dir):
+    root, season = tree
+    for i in range(3):
+        r = execute.execute_plan(make_plan(season), [root], undo_dir, now=i * 86400)
+        execute.undo(r.manifest, undo_dir, [root])
+    assert len(execute.list_runs(undo_dir)) == 3
+    assert len(execute.list_runs(undo_dir, limit=2)) == 2
+
+
+def test_pruning_drops_the_oldest_beyond_the_cap(undo_dir):
+    undo_dir.mkdir(parents=True)
+    names = ["2026081{}T000000Z-aaa.json".format(i) for i in range(1, 6)]
+    for n in names:
+        (undo_dir / n).write_text('{"version": 1, "operations": []}')
+    (undo_dir / "not-a-manifest.txt").write_text("x")
+
+    removed = execute.prune_runs(undo_dir, keep=2)
+    assert removed == names[:3]                      # the three oldest
+    assert sorted(p.name for p in undo_dir.iterdir()) == \
+        sorted(names[3:] + ["not-a-manifest.txt"])   # non-manifests untouched
+
+
+def test_pruning_is_disabled_by_zero(undo_dir):
+    undo_dir.mkdir(parents=True)
+    (undo_dir / "20260811T000000Z-a.json").write_text('{"version": 1}')
+    assert execute.prune_runs(undo_dir, keep=0) == []
+    assert len(list(undo_dir.iterdir())) == 1
+
+
+def test_a_run_prunes_old_manifests_but_keeps_its_own(tree, undo_dir):
+    root, season = tree
+    undo_dir.mkdir(parents=True)
+    for i in range(1, 4):
+        (undo_dir / "2026080{}T000000Z-old.json".format(i)).write_text(
+            '{"version": 1, "operations": []}')
+    result = execute.execute_plan(make_plan(season), [root], undo_dir, keep_runs=2)
+    left = sorted(p.name for p in undo_dir.iterdir())
+    assert result.manifest in left
+    assert len(left) == 2
+
+
+# ── Logging: refusals are only visible here ────────────────────────────────
+
+def test_a_refusal_is_logged_with_its_reasons(tree, undo_dir, caplog):
+    """A refused run leaves no manifest by design, so the log is the only place
+    'why would it not rename this' can be answered."""
+    root, season = tree
+    first = "Nagatan and Aoto (2026) - {}.mp4".format(TIMECODES[0])
+    with caplog.at_level("WARNING", logger="execute"):
+        execute.execute_plan(make_plan(season, name_overrides={first: "x.mkv"}),
+                             [root], undo_dir)
+    assert "execute REFUSED" in caplog.text
+    assert "Extension must stay" in caplog.text
+    assert not undo_dir.exists()
+
+
+def test_a_successful_run_and_its_undo_are_both_logged(tree, undo_dir, caplog):
+    root, season = tree
+    with caplog.at_level("INFO", logger="execute"):
+        result = execute.execute_plan(make_plan(season), [root], undo_dir)
+        execute.undo(result.manifest, undo_dir, [root])
+    assert "execute START" in caplog.text
+    assert "execute DONE" in caplog.text
+    assert "undo START" in caplog.text
+    assert "undo DONE" in caplog.text
+
+
+def test_a_per_file_failure_is_logged_individually(tree, undo_dir, caplog, monkeypatch):
+    """'nine of ten applied' is not debuggable on its own."""
+    root, season = tree
+    real = os.rename
+    calls = {"n": 0}
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("simulated NFS hiccup")
+        return real(src, dst)
+
+    monkeypatch.setattr(execute.os, "rename", flaky)
+    with caplog.at_level("WARNING", logger="execute"):
+        result = execute.execute_plan(make_plan(season), [root], undo_dir)
+    assert not result.ok
+    assert "simulated NFS hiccup" in caplog.text
+    assert "FAILED" in caplog.text

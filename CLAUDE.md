@@ -31,6 +31,21 @@ deliberately absent from that list — do not add the others to it.
 - Settled: an emptied `Season YYYY` **is** removed, but only that form — an emptied
   `Season 1` stays. Anything left in the folder (a poster, a skipped file) keeps it.
 
+## History and logging
+
+- The manifests **are** the activity history; `/api/runs` reads them back rather than
+  keeping a second record that could disagree with what undo will do. `renames` counts
+  applied `move` ops only, not the mkdir/rmdir bookkeeping around them.
+- `inputs` was added to the manifest body **without bumping `MANIFEST_VERSION`**: it is
+  simply absent from earlier manifests, which stay readable and undoable. Bumping would
+  have discarded the undo record for runs that already happened.
+- **A refusal writes no manifest**, so it is invisible to the history by design. The log
+  is the only place to debug one. Logging goes to stderr and nowhere else — journald owns
+  persistence once the Phase 4 unit exists, and a log file here would put file writing
+  into `app.py`, which the pinned non-mutation test exists to prevent.
+- `keep_runs` (config, default 200) prunes oldest-first after a successful run. Pruning
+  can never fail a run: the files are already moved by the time it runs.
+
 Phase 4 is deploy (`/opt/plex-renamer`, `/etc/plex-renamer/config.ini`, systemd unit,
 port 8101) and proving it on a scratch copy first. Phase 5 is destination show folders,
 confined to the same root *and* same `st_dev`.
@@ -61,7 +76,7 @@ One pre-existing naming misfire is **fixed**; one remains. Neither was caught by
 
 | | |
 |---|---|
-| Tests | `.venv/bin/python -m pytest tests -q` (162 passing) |
+| Tests | `.venv/bin/python -m pytest tests -q` (205 passing) |
 | Push | `GIT_SSH_COMMAND='ssh -F ~/.ssh/config' git push` — remote uses the **`github-byuchino`** alias; `byuchino` is not this machine's default GitHub account |
 | VM | `ssh handbrake-vm` (`brian@192.168.254.206`), **Python 3.8.10** |
 | Roots | `/mnt/bama/volume1/TV Shows`, `/mnt/bama/volume1/Videos/KIKU` — both on the home NAS |

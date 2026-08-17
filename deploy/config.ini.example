@@ -9,6 +9,10 @@
 roots    = /mnt/bama/volume1/TV Shows, /mnt/bama/volume1/Videos/KIKU
 undo_dir = /var/lib/plex-renamer/undo
 
+# Run manifests are both the undo records and the activity history, so this is
+# how far back both reach. ~3 KB each; 0 keeps everything for ever.
+keep_runs = 200
+
 [server]
 bind_host = 0.0.0.0
 bind_port = 8101

@@ -132,7 +132,19 @@ the page.
   per-file results.
 - Confirmation dialog listing every old→new pair, guarded by a plan hash so the
   directory cannot change between confirming and executing.
-- **Undo manifest** (old→new JSON) written before the first move.
+- **Undo manifest** written before the first move.
+- **History**, in the page and always visible, because a run has to be reachable after
+  you have navigated away from the folder it touched — otherwise closing the result
+  dialog is the last chance to undo it. It is not a second record: it is the manifests
+  read back, so it cannot disagree with what undo will actually do. Each entry expands to
+  every operation and its outcome, and carries the inputs the run was made with.
+- **A refused run leaves no manifest** and so no history entry, deliberately — "a
+  manifest exists" has to keep meaning "something happened". Refusals go to the log, at
+  WARNING with their reasons, which is the only place "why will it not rename this" can
+  be answered. `/api/plan` is logged at DEBUG only: it fires on every keystroke.
+- **Retention** via `keep_runs` (default 200, `0` for unlimited). Pruning is strictly
+  oldest-first and ignores whether a run was undone — once a run is 200 runs old,
+  offering to reverse it is worse than forgetting it.
 - Files not matching the fallback pattern are listed as **skipped, never hidden**.
 - Navigation confined to configured roots, resolved with `realpath` so `..` cannot
   escape.
@@ -170,7 +182,7 @@ deploy/        systemd unit, config.ini.example
 ```
 
 Endpoints: `GET /api/browse`, `POST /api/plan` (no writes), `POST /api/execute`,
-`POST /api/undo`.
+`POST /api/undo`, `GET /api/runs`, `GET /api/runs/<manifest>`.
 
 `POST /api/execute` takes the same body as `/api/plan` plus the `fingerprint` of the
 plan the user confirmed. It rebuilds the plan here, from a fresh listing, and compares:

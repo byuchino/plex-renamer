@@ -9,8 +9,22 @@ the operational facts that are not derivable from the code.
 ## Status
 
 Phases 1 through 4 are complete: **installed as `plex-renamer.service` on the VM and able
-to move real files.** Phase 5 (destination show folders, for merging duplicate show
-folders) is next.
+to move real files.** 208 tests. `main` is pushed and the deployed code in
+`/opt/plex-renamer` matches `HEAD` byte for byte (checked by md5).
+
+**Resume here — nothing is half-finished; these are choices, not chores:**
+
+1. **Phase 5, the next build:** destination show folders, so the duplicate show folders in
+   the library can be merged. Pick an existing destination *show* folder by browsing;
+   confine to the same root **and** the same `st_dev` (the roots are separate NFS exports,
+   so cross-root is `EXDEV`); hard-refuse cross-device rather than silently copying
+   multi-GB files. Season subfolder still derived as it is today.
+2. **A decision only the user can make:** `Star Wars The Clone Wars` holds two complete
+   copies of every season (see below). 125 renames whichever naming is chosen. It is a
+   "which copy do you keep" call, not something this tool can settle.
+3. **Nothing else is outstanding.** Watched state is settled (see below, do not re-open).
+   No known bugs. The real-library sweep sits at 56 of 599 folders proposing changes, and
+   the ones that do are either genuine fixes or the Clone Wars duplicate above.
 
 `test_no_module_can_mutate_the_filesystem` in `tests/test_app.py` pins `app.py`,
 `core.py` and `config.py` as non-mutating. `execute.py` is the single exception and is

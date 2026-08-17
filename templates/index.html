@@ -456,8 +456,7 @@ function open(path) {
   }
 }
 
-window.onhashchange = function () { browse(hashPath());
-loadRuns(); };
+window.onhashchange = function () { browse(hashPath()); };
 
 // ── Planning ───────────────────────────────────────────────────────────────
 
@@ -782,14 +781,20 @@ function runBadge(r) {
 }
 
 async function loadRuns() {
-  let data;
+  // Everything is inside the try, rendering included: a throw halfway through
+  // used to leave the section reading "Loading…" for ever, which is
+  // indistinguishable from a hung request. A visible error beats a silent one.
   try {
-    const res = await fetch("/api/runs");
-    data = await res.json();
+    await renderRuns();
   } catch (e) {
-    document.getElementById("history-foot").textContent = String(e);
-    return;
+    document.getElementById("history-foot").textContent =
+      "Could not load history: " + String(e);
   }
+}
+
+async function renderRuns() {
+  const res = await fetch("/api/runs");
+  const data = await res.json();
   const runs = data.runs || [];
   const box = document.getElementById("history");
   box.innerHTML = runs.map(function (r) {
@@ -902,6 +907,9 @@ document.getElementById("result-close").onclick = function () {
 };
 
 browse(hashPath());
+// The history is global, not tied to the browsed folder, so it loads once on
+// page load rather than on navigation.
+loadRuns();
 </script>
 </body>
 </html>

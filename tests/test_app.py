@@ -5,6 +5,7 @@ and config.py contain no filesystem mutation at all: execute.py is the single
 module allowed to move a file, and that stays true now that it exists. The list
 in test_no_module_can_mutate_the_filesystem deliberately does not include it.
 """
+import re
 from pathlib import Path
 
 import pytest
@@ -627,3 +628,39 @@ def test_a_refused_run_leaves_no_history_entry(client, library):
                           fingerprint=plan["fingerprint"])
     assert code == 409
     assert client.get("/api/runs").get_json()["runs"] == []
+
+
+# ── Page wiring ────────────────────────────────────────────────────────────
+
+def _page_script():
+    html = (Path(__file__).resolve().parent.parent / "templates" / "index.html").read_text()
+    return re.search(r"<script>(.*)</script>", html, re.S).group(1)
+
+
+def test_the_history_loads_on_page_load_not_only_on_navigation():
+    """Regression: loadRuns() was once wired into onhashchange instead of the
+    initial call, so a fresh page load left History reading 'Loading…' for ever
+    and it only populated after clicking a folder. A syntax check and an
+    element-id audit both pass on that bug, so it needs pinning here.
+
+    Top-level statements in this file sit at column 0, which is what
+    distinguishes 'called on load' from 'called inside a handler'.
+    """
+    script = _page_script()
+    assert re.search(r"^loadRuns\(\);$", script, re.M), \
+        "loadRuns() is not called as a top-level statement on page load"
+    assert re.search(r"^browse\(hashPath\(\)\);$", script, re.M)
+    # ...and the hashchange handler must not have swallowed it
+    handler = re.search(r"window\.onhashchange = .*", script).group(0)
+    assert "loadRuns" not in handler
+
+
+def test_the_history_section_is_outside_the_planner():
+    """It has to be reachable when no folder is selected — that is the whole
+    point of it, since the planner is hidden until a folder has renameable
+    files."""
+    html = (Path(__file__).resolve().parent.parent / "templates" / "index.html").read_text()
+    planner = html.index('<div id="planner"')
+    history = html.index('<section id="history-section">')
+    # the planner div closes before the history section begins
+    assert html.index('<div class="overlay"', planner) > history > planner

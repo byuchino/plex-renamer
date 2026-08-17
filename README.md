@@ -53,7 +53,7 @@ deliberately preferred over giving a general-purpose renamer write access to `jo
 | Show Name | show folder, stripped of `(Year)` and `{id}` |
 | Year | show folder |
 | ID + TMDB/TVDB radio | `{tmdb-…}` / `{tvdb-…}` in the show folder; blank + TMDB when absent |
-| Season | season folder, unless it is a 4-digit year, then `01` |
+| Season | season folder — `Specials` is season 0; a 4-digit year means Plex gave up, so `01` |
 
 **Airings per episode.** Most Hawaii series are broadcast twice — the original and
 a re-broadcast the next day — and Plex records both, so a 16-file folder is routinely
@@ -97,6 +97,13 @@ exactly as named. Both `Season 1` and `Season 01` are common in a real library (
 55 of them here), and always targeting the padded form would move every file out of a
 perfectly good `Season 1` into a second folder, splitting the season in two.
 
+`Specials` counts as season 0 — Plex's own name for it, and what 29 of the 30 season-0
+folders here are called (the other is `Season 00`, which is equally valid and equally left
+alone). Without that, the word means nothing to the tool, the season defaults to 1, and
+opening a Specials folder proposes renumbering `S00E01` into `S01E01` **and** moving the
+files out into `Season 01` beside the real episodes — a valid, executable plan, in 27 of
+these folders. A season-0 folder that has to be *created* is named `Specials` to match.
+
 **Table**, one row per matching file, sorted by timecode. Each row shows the editable
 proposed name and an **Episode** button opening a selectable matrix. Episodes start at
 `01` and increment; picking a value for a row **cascades forward** to later rows and
@@ -104,7 +111,10 @@ leaves earlier rows unchanged. Changing any top input recomputes every row.
 
 **Season folder:** files are **moved into `Season <nn>`** (created if needed), rather
 than renaming the folder in place — so one year folder can later be split across
-seasons. An emptied `Season YYYY` is removed; if anything remains it is left alone.
+seasons. An emptied `Season YYYY` is removed; if anything remains — a poster, a skipped
+file — it is left alone. Only the year-fallback form is cleaned up: an emptied
+`Season 1` stays, because removing a folder the user did not ask about is the greater
+surprise.
 
 **Show folder rename is opt-in** via checkbox. When ticked the folder becomes
 `<Show Name> (<Year>) {id}` from all three inputs. Opt-in specifically so a typo in
@@ -159,6 +169,25 @@ deploy/        systemd unit, config.ini.example
 Endpoints: `GET /api/browse`, `POST /api/plan` (no writes), `POST /api/execute`,
 `POST /api/undo`.
 
+`POST /api/execute` takes the same body as `/api/plan` plus the `fingerprint` of the
+plan the user confirmed. It rebuilds the plan here, from a fresh listing, and compares:
+a folder that changed between the dialog and the click is refused whole rather than
+half-applied against names nobody agreed to. `POST /api/undo` takes a manifest filename
+and nothing else — a path segment there would read JSON from anywhere on disk and then
+hand it to `os.rename`.
+
+**The undo manifest is an ordered op log**, not a flat old→new map, and it is undone in
+reverse. That is what lets the opt-in show-folder rename — which changes the parent of
+every path already recorded — belong to the same run: undo puts the folder back first,
+and the recorded file paths are valid again. Each op carries what *actually* happened,
+so a run that failed halfway reverses exactly the part that landed.
+
+**Rename order is computed, not assumed.** Renumbering a run produces chains (E01→E02
+while E02→E03) and, rarely, a cycle (two files swapping names). `core.order_moves`
+sequences them so no rename ever lands on a file that has not moved yet, parking one
+file under a temporary name to break a cycle. Applied in listing order, the first move
+of a chain would silently destroy a file.
+
 `POST /api/plan` takes the folder plus any inputs the user has changed. An **absent**
 key means "derive it from the path"; a key present but **empty** means "the user
 cleared it, leave it out" — which is how a show with no year and a show whose year has
@@ -174,7 +203,7 @@ the page reachable in one step from a headless browser.
 1. ✅ **Core + tests + `cli.py --dry-run`.** No write capability exists in the codebase yet.
 2. ✅ **Web UI, read-only.** Full page driving `/api/plan`. Can be pointed at the real
    library and is incapable of changing it.
-3. **Execute.** `execute.py`, undo manifest, confirmation dialog, plan hash.
+3. ✅ **Execute.** `execute.py`, undo manifest, confirmation dialog, plan hash.
 4. **Deploy and prove.** First real run against a scratch copy of one season, then the
    single-file watched-state test, then real use.
 
@@ -218,23 +247,35 @@ previous version and go looking for a bug that is not there.
 
 ## Status
 
-**Phases 1, 2 and 2.5 complete. Nothing deployed, and no code in this repo can move a
-file.**
+**Phases 1 through 3 complete. Nothing deployed — and the code can now move a file.**
 
 The page browses the configured roots, derives all four inputs from the path (or from
 the files, see above), live re-plans on every edit, groups re-broadcasts via
 airings-per-episode, cascades an episode pick forward, handles episodic and mixed
-folders, and validates hand-typed names — with the Rename button permanently disabled
-until Phase 3 supplies an endpoint behind it.
+folders, validates hand-typed names, and executes a confirmed plan behind a dialog that
+lists every pair — writing an undo manifest first, with one-click undo of the run just
+made.
+
+`test_app.py`'s `test_no_module_can_mutate_the_filesystem` pins `app.py`, `core.py` and
+`config.py` as containing no mutation at all. `execute.py` is the single exception and is
+deliberately **not** on that list. Do not relax the rule for the others.
 
 **Known gap, deliberately not built:** renumbering a *run* of already-episodic files
 (an off-by-one across a whole season) takes one pick per file today, because a pick
 never cascades through numbered files. The fix, if it is ever wanted, is to shift
 subsequent numbered files by the same delta rather than resequencing them, so gaps
-survive.
+survive. Execution handles the resulting chains correctly either way.
 
-Phase 3 is next: `execute.py`, the undo manifest, the confirmation dialog, and the plan
-hash check. That is the first phase that can change a library, so `test_app.py`'s
-`test_no_module_can_mutate_the_filesystem` deliberately pins `app.py`, `core.py` and
-`config.py` as non-mutating — add `execute.py` as the one exception, do not relax the
-rule for the others.
+**Settled since:** `Specials` is now recognised as season 0 (above), which took the
+library from 81 folders proposing changes to 56 — 25 `Specials` folders went quiet, no
+folder started proposing anything, and the two that still do are instances of the case
+below rather than of this one. Remaining, one level down: a folder whose episodic files disagree with each other falls back to the
+folder name for show and year (as designed). The one show where that bites,
+`Star Wars The Clone Wars`, turns out to hold **two complete copies of every season** — a
+bare `.avi` rip and a titled 1080p `.mkv` — so no show-name/year choice leaves both sets
+alone, and adding the missing `(2008)` to the folder raises the churn from 125 renames to
+141 rather than settling it. That one is a duplicate-media decision, not a naming bug.
+Neither is new behaviour, and neither is caught by the 60-folder sweep.
+
+Phase 4 is next: deploy, then the first real run against a scratch copy of one season,
+then the single-file watched-state test.

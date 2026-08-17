@@ -1,9 +1,9 @@
 """Tests for the Flask layer.
 
-Phase 2 is read-only, so alongside the behavioural tests there is an explicit
-check that no route and no imported module can move a file — that property is
-the whole point of shipping the UI before execute.py, and it should fail loudly
-if someone wires up a write later without noticing which phase they are in.
+Alongside the behavioural tests there is an explicit check that app.py, core.py
+and config.py contain no filesystem mutation at all: execute.py is the single
+module allowed to move a file, and that stays true now that it exists. The list
+in test_no_module_can_mutate_the_filesystem deliberately does not include it.
 """
 from pathlib import Path
 
@@ -34,9 +34,10 @@ def library(tmp_path):
 
 
 @pytest.fixture
-def client(library):
+def client(library, tmp_path):
     root, _ = library
-    return create_app(Config(roots=[root])).test_client()
+    return create_app(Config(roots=[root],
+                             undo_dir=tmp_path / "undo")).test_client()
 
 
 def get_plan(client, **payload):
@@ -254,11 +255,115 @@ def test_empty_folder_is_an_issue_not_a_crash(client, library):
     assert "No renameable video files" in " ".join(data["issues"])
 
 
-# ── Phase 2 is read-only ───────────────────────────────────────────────────
+# ── Executing ──────────────────────────────────────────────────────────────
 
-def test_no_execute_route_exists_yet(client):
-    for route in ("/api/execute", "/api/undo"):
-        assert client.post(route, json={}).status_code == 404
+def execute_run(client, **payload):
+    res = client.post("/api/execute", json=payload)
+    return res.status_code, res.get_json()
+
+
+def test_execute_renames_the_files_and_returns_an_undo_manifest(client, library):
+    _, season = library
+    _, plan = get_plan(client, path=str(season))
+    code, data = execute_run(client, path=str(season), fingerprint=plan["fingerprint"])
+    assert code == 200
+    assert data["ok"] is True
+    assert data["manifest"].endswith(".json")
+
+    dest = season.parent / "Season 01"
+    assert data["season_dir"] == str(dest)
+    assert sorted(p.name for p in dest.iterdir()) == \
+        [f["target_name"] for f in plan["files"]]
+
+
+def test_execute_needs_the_fingerprint_of_the_plan_that_was_confirmed(client, library):
+    _, season = library
+    before = sorted(p.name for p in season.iterdir())
+    code, data = execute_run(client, path=str(season))
+    assert code == 400
+    assert "fingerprint" in data["error"]
+    assert sorted(p.name for p in season.iterdir()) == before
+
+
+def test_a_folder_that_changed_since_the_dialog_is_refused(client, library):
+    """The guard the fingerprint exists for: a new recording lands between
+    confirming and clicking, so the names the user agreed to are no longer the
+    names that would be written."""
+    _, season = library
+    _, plan = get_plan(client, path=str(season))
+    (season / "Nagatan and Aoto (2026) - 2026-07-06 23 00 00.mp4").touch()
+    before = sorted(p.name for p in season.iterdir())
+
+    code, data = execute_run(client, path=str(season), fingerprint=plan["fingerprint"])
+    assert code == 409
+    assert "changed since" in data["error"]
+    assert data["fingerprint"] != plan["fingerprint"]      # the new one, to re-plan against
+    assert sorted(p.name for p in season.iterdir()) == before
+    assert not (season.parent / "Season 01").exists()
+
+
+def test_execute_refuses_a_plan_with_a_bad_row_and_touches_nothing(client, library):
+    _, season = library
+    first = "Nagatan and Aoto (2026) - {}.mp4".format(TIMECODES[0])
+    overrides = {first: "Renamed.mkv"}          # changes the container
+    _, plan = get_plan(client, path=str(season), name_overrides=overrides)
+    before = sorted(p.name for p in season.iterdir())
+
+    code, data = execute_run(client, path=str(season), name_overrides=overrides,
+                             fingerprint=plan["fingerprint"])
+    assert code == 409
+    assert data["ok"] is False
+    assert any("Extension must stay" in r for r in data["refused"])
+    assert sorted(p.name for p in season.iterdir()) == before
+
+
+def test_execute_carries_the_form_inputs_through(client, library):
+    """Same body as /api/plan, so a season number typed in the form is the one
+    that gets written."""
+    _, season = library
+    _, plan = get_plan(client, path=str(season), season=4, per_episode=2)
+    code, data = execute_run(client, path=str(season), season=4, per_episode=2,
+                             fingerprint=plan["fingerprint"])
+    assert code == 200, data
+    dest = season.parent / "Season 04"
+    assert sorted(p.name for p in dest.iterdir())[:2] == [
+        "Nagatan and Aoto (2026) - S04E01 - {}.mp4".format(TIMECODES[0]),
+        "Nagatan and Aoto (2026) - S04E01 - {}.mp4".format(TIMECODES[1]),
+    ]
+
+
+def test_execute_outside_the_roots_is_refused(client, tmp_path):
+    code, _ = execute_run(client, path=str(tmp_path / "elsewhere"), fingerprint="x")
+    assert code == 400
+
+
+@pytest.mark.parametrize("route", ["/api/execute", "/api/undo"])
+def test_the_acting_routes_reject_a_non_object_body(client, route):
+    assert client.post(route, json=["not", "an", "object"]).status_code == 400
+
+
+def test_undo_puts_the_run_back(client, library):
+    _, season = library
+    before = sorted(p.name for p in season.iterdir())
+    _, plan = get_plan(client, path=str(season))
+    _, run = execute_run(client, path=str(season), fingerprint=plan["fingerprint"])
+
+    res = client.post("/api/undo", json={"manifest": run["manifest"]})
+    assert res.status_code == 200
+    assert res.get_json()["ok"] is True
+    assert sorted(p.name for p in season.iterdir()) == before
+    assert not (season.parent / "Season 01").exists()
+
+
+def test_undo_of_an_unknown_manifest_is_a_404(client):
+    res = client.post("/api/undo", json={"manifest": "20260101T000000Z-abc.json"})
+    assert res.status_code == 404
+
+
+@pytest.mark.parametrize("name", ["../../etc/passwd", "sub/x.json", ""])
+def test_undo_will_not_read_a_manifest_from_anywhere_else(client, name):
+    res = client.post("/api/undo", json={"manifest": name})
+    assert res.status_code == 404
 
 
 def test_planning_leaves_the_directory_untouched(client, library):
@@ -390,3 +495,56 @@ def test_synology_and_hidden_folders_are_not_listed(tmp_path, noise):
     c = create_app(Config(roots=[root])).test_client()
     data = c.get("/api/browse", query_string={"path": str(root)}).get_json()
     assert [d["name"] for d in data["dirs"]] == ["Real Show"]
+
+
+# ── Specials folders (season 0) ─────────────────────────────────────────────
+
+@pytest.fixture
+def specials_library(tmp_path):
+    """A show whose Specials folder is already correctly named."""
+    root = (tmp_path / "TV Shows").resolve()
+    season = root / "Some Show (2015) {tvdb-255359}" / "Specials"
+    season.mkdir(parents=True)
+    for n in (2, 5):
+        (season / "Some Show (2015) - S00E0{} - a tail.mp4".format(n)).touch()
+    return root, season
+
+
+@pytest.fixture
+def specials_client(specials_library, tmp_path):
+    root, _ = specials_library
+    return create_app(Config(roots=[root],
+                             undo_dir=tmp_path / "undo")).test_client()
+
+
+def test_a_specials_folder_opens_as_a_no_op(specials_client, specials_library):
+    """Before Specials was understood this folder opened proposing to renumber
+    S00 into S01 and move both files out into 'Season 01' — a valid, executable
+    plan, in 27 real folders."""
+    _, season = specials_library
+    code, data = get_plan(specials_client, path=str(season))
+    assert code == 200
+    assert data["inputs"]["season"] == 0
+    assert data["move_count"] == 0
+    assert data["ok"] is True
+    assert data["season_dir_target"] == str(season)
+    assert data["season_dir_was_year"] is False
+
+
+def test_the_rename_button_has_nothing_to_do_in_a_clean_specials_folder(
+        specials_client, specials_library):
+    """move_count 0 and no show-folder change is what disables the button."""
+    _, season = specials_library
+    _, data = get_plan(specials_client, path=str(season))
+    assert (data["move_count"], data["show_dir_changes"]) == (0, False)
+
+
+def test_executing_a_clean_specials_folder_is_refused(specials_client, specials_library):
+    _, season = specials_library
+    _, plan = get_plan(specials_client, path=str(season))
+    before = sorted(p.name for p in season.iterdir())
+    code, data = execute_run(specials_client, path=str(season),
+                             fingerprint=plan["fingerprint"])
+    assert code == 409
+    assert any("Nothing to rename" in r for r in data["refused"])
+    assert sorted(p.name for p in season.iterdir()) == before

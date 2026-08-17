@@ -23,7 +23,8 @@ def test_parse_show_dir(folder, expected):
     ("Season 3", (3, False)),
     ("season 12", (12, False)),
     ("Season 2026", (None, True)),   # Plex's "unknown season" marker
-    ("Specials", (None, False)),
+    ("Specials", (0, False)),        # Plex's name for season 0
+    ("Featurettes", (None, False)),  # not a season folder at all
 ])
 def test_parse_season_dir(folder, expected):
     assert core.parse_season_dir(folder) == expected
@@ -460,3 +461,142 @@ def test_the_folder_still_wins_when_the_files_disagree_with_each_other(tmp_path)
     (season / "Other Name - S01E02 - b.mkv").touch()
     d = core.derive_defaults(season, sorted(season.iterdir()))
     assert (d.show_name, d.year) == ("Real Name", "2001")
+
+
+# ── Move ordering (Phase 3) ────────────────────────────────────────────────
+
+def P(*names):
+    return [Path("/s/" + n) for n in names]
+
+
+def test_independent_moves_keep_their_order():
+    moves = [(Path("/s/a"), Path("/s/x")), (Path("/s/b"), Path("/s/y"))]
+    assert core.order_moves(moves) == moves
+
+
+def test_a_chain_is_ordered_so_nothing_is_overwritten():
+    """Shifting a run down: E02 becomes E01 while E03 becomes E02. Applied in
+    listing order that would overwrite E01 and lose a file."""
+    e1, e2, e3 = P("E01.mkv", "E02.mkv", "E03.mkv")
+    ordered = core.order_moves([(e2, e1), (e3, e2)])
+    assert ordered == [(e2, e1), (e3, e2)]
+
+    # ...and the same set given in the other order still moves E02 out first.
+    ordered = core.order_moves([(e3, e2), (e2, e1)])
+    assert ordered.index((e2, e1)) < ordered.index((e3, e2))
+
+
+def test_every_target_is_free_when_its_move_runs():
+    """The property that matters, checked by simulating the sequence."""
+    a, b, c, d = P("a", "b", "c", "d")
+    ordered = core.order_moves([(a, b), (b, c), (c, d)])
+    on_disk = {a, b, c}          # d is the one free name the chain shifts into
+    for src, dst in ordered:
+        assert src in on_disk, "{} was not there to move".format(src)
+        assert dst not in on_disk, "{} would have been overwritten".format(dst)
+        on_disk.discard(src)
+        on_disk.add(dst)
+
+
+def test_a_swap_is_broken_with_a_temporary_name():
+    a, b = P("Show - S01E01 - t.mkv", "Show - S01E02 - t.mkv")
+    ordered = core.order_moves([(a, b), (b, a)])
+    assert len(ordered) == 3                      # one move became two
+    on_disk = {a, b}
+    for src, dst in ordered:
+        assert src in on_disk
+        assert dst not in on_disk
+        on_disk.discard(src)
+        on_disk.add(dst)
+    assert on_disk == {a, b}                      # and the swap completed
+    # the parking name stays in the same directory, so it cannot cross a device
+    assert all(src.parent == dst.parent for src, dst in ordered)
+
+
+def test_ordering_preserves_the_set_of_real_moves():
+    moves = [(Path("/s/a"), Path("/s/b")), (Path("/s/c"), Path("/s/d"))]
+    ordered = core.order_moves(moves)
+    assert sorted(str(s) for s, _ in ordered) == ["/s/a", "/s/c"]
+    assert sorted(str(d) for _, d in ordered) == ["/s/b", "/s/d"]
+
+
+def test_order_moves_of_nothing_is_nothing():
+    assert core.order_moves([]) == []
+
+
+# ── Specials is season 0 ───────────────────────────────────────────────────
+
+@pytest.mark.parametrize("folder,expected", [
+    ("Specials", (0, False)),
+    ("specials", (0, False)),
+    ("Specials ", (0, False)),
+    ("Season 00", (0, False)),        # the other spelling, already understood
+    ("Season 0", (0, False)),
+    ("Featurettes", (None, False)),   # still means nothing to the tool
+])
+def test_parse_season_dir_knows_specials(folder, expected):
+    assert core.parse_season_dir(folder) == expected
+
+
+def test_a_specials_folder_opens_as_a_no_op(tmp_path):
+    """The whole point of the fix. Before it, a Specials folder defaulted to
+    season 1 and proposed renumbering S00 into S01 *and* moving every file out
+    into 'Season 01' beside the real episodes — 27 folders in the real library,
+    all of them a valid, executable plan."""
+    season = tmp_path / "Some Show (2015) {tvdb-1}" / "Specials"
+    season.mkdir(parents=True)
+    for n in (1, 2):
+        (season / "Some Show (2015) - S00E0{} - a tail.mp4".format(n)).touch()
+
+    entries = sorted(season.iterdir())
+    d = core.derive_defaults(season, entries)
+    assert d.season == 0
+    assert d.season_dir_was_year is False
+
+    plan = core.build_plan(season_dir=season, entries=entries,
+                           show_name=d.show_name, year=d.year, season=d.season)
+    assert plan.moves == []
+    assert plan.ok
+    assert plan.season_dir_target == season       # left exactly as named
+
+
+def test_specials_files_are_written_as_season_00(tmp_path):
+    """A timecode recording dropped in a Specials folder gets S00, not S01."""
+    season = tmp_path / "Some Show (2015)" / "Specials"
+    season.mkdir(parents=True)
+    (season / "Some Show (2015) - 2026-06-22 23 00 00.mp4").touch()
+    plan = core.build_plan(season_dir=season, entries=sorted(season.iterdir()),
+                           show_name="Some Show", year="2015", season=0)
+    assert [f.target.name for f in plan.files] == \
+        ["Some Show (2015) - S00E01 - 2026-06-22 23 00 00.mp4"]
+    assert plan.season_dir_target == season
+
+
+@pytest.mark.parametrize("season,expected", [
+    (0, "Specials"), (1, "Season 01"), (3, "Season 03"), (12, "Season 12"),
+])
+def test_season_dir_name(season, expected):
+    assert core.season_dir_name(season) == expected
+
+
+def test_a_new_season_zero_folder_is_called_specials(tmp_path):
+    """Moving specials out of a year folder creates 'Specials', matching the
+    library's own convention rather than 'Season 00'."""
+    season = tmp_path / "Some Show (2015)" / "Season 2026"
+    season.mkdir(parents=True)
+    (season / "Some Show (2015) - 2026-06-22 23 00 00.mp4").touch()
+    plan = core.build_plan(season_dir=season, entries=sorted(season.iterdir()),
+                           show_name="Some Show", year="2015", season=0)
+    assert plan.season_dir_target == season.parent / "Specials"
+
+
+def test_an_existing_season_00_folder_is_not_renamed_to_specials(tmp_path):
+    """Both spellings are valid to Plex, so a folder that already denotes
+    season 0 is left alone — same rule that protects 'Season 1'."""
+    season = tmp_path / "Some Show (2015)" / "Season 00"
+    season.mkdir(parents=True)
+    (season / "Some Show (2015) - S00E01 - a tail.mp4").touch()
+    plan = core.build_plan(season_dir=season, entries=sorted(season.iterdir()),
+                           show_name="Some Show", year="2015", season=0)
+    assert plan.season_dir_target == season
+    assert plan.moves == []

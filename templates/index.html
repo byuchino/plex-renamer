@@ -135,13 +135,33 @@
   .matrix button:hover { border-color: var(--accent); }
   .matrix button.current { background: rgba(59,130,246,.2); border-color: var(--accent); color: var(--accent); }
   .modal .typed { display: flex; gap: 8px; padding: 0 14px 14px; align-items: center; }
+  .modal.wide { width: min(780px, 94vw); }
+  .modal h2 { font-size: 13px; margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--border);
+              color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+
+  /* Confirmation / result list. Every pair is shown, never a count: the whole
+     point of the dialog is that you can read what is about to happen. */
+  .pairs { max-height: 46vh; overflow-y: auto; }
+  .pair { padding: 6px 14px; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .pair:last-child { border-bottom: none; }
+  .pair .from, .pair .to { display: block; word-break: break-all; }
+  .pair .from { color: var(--muted); }
+  .pair .to::before { content: "→ "; color: var(--muted); }
+  .pair.failed .to::before { content: "×  "; color: var(--bad); }
+  .pair .why { color: var(--bad); }
+  .pair .op { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: .04em; }
+  .banner { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  .banner.bad { color: var(--bad); }
+  .banner.ok { color: var(--ok); }
+  .spin { color: var(--muted); }
 </style>
 </head>
 <body>
 
 <h1>Plex Renamer</h1>
 <div class="sub" id="phase-note">
-  Read-only preview. Nothing on this page can move a file yet — renaming arrives in Phase&nbsp;3.
+  Renames Plex recordings in place. Every run is listed for confirmation first and
+  writes an undo manifest before it moves anything.
 </div>
 
 <section>
@@ -222,8 +242,7 @@
       <span id="verdict"></span>
       <span style="flex:1"></span>
       <button class="ghost" id="reset-btn">Reset edits</button>
-      <button class="primary" id="rename-btn" disabled
-              title="Execution is not implemented yet — Phase 3">Rename…</button>
+      <button class="primary" id="rename-btn" disabled>Rename…</button>
     </div>
     <div class="pad note">Plan fingerprint <span class="mono" id="fingerprint">—</span></div>
   </section>
@@ -240,6 +259,29 @@
   </div>
 </div>
 
+<div class="modal wide" id="confirm">
+  <h2>Confirm rename</h2>
+  <div class="banner" id="confirm-banner"></div>
+  <div class="pairs" id="confirm-pairs"></div>
+  <div class="typed">
+    <span class="note">Plan <span class="mono" id="confirm-fp"></span></span>
+    <span style="flex:1"></span>
+    <button class="ghost" id="confirm-cancel">Cancel</button>
+    <button class="primary" id="confirm-go">Rename these files</button>
+  </div>
+</div>
+
+<div class="modal wide" id="result">
+  <h2 id="result-title">Result</h2>
+  <div class="banner" id="result-banner"></div>
+  <div class="pairs" id="result-pairs"></div>
+  <div class="typed">
+    <button class="ghost" id="result-undo" style="display:none">Undo this run</button>
+    <span style="flex:1"></span>
+    <button class="primary" id="result-close">Done</button>
+  </div>
+</div>
+
 <script>
 const state = {
   path: null,
@@ -248,12 +290,30 @@ const state = {
   anchors: {},        // source_name -> episode number
   overrides: {},      // source_name -> hand-typed target name
   modalFor: null,
+  lastPlan: null,     // the plan the confirmation dialog is built from
+  manifest: null,     // undo manifest of the run just executed
+  busy: false,        // a rename is in flight; nothing may be dismissed
 };
 
 function esc(s) {
   return String(s === null || s === undefined ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+const MODALS = ["modal", "confirm", "result"];
+
+function showModal(id) {
+  MODALS.forEach(function (m) { document.getElementById(m).classList.remove("open"); });
+  document.getElementById(id).classList.add("open");
+  document.getElementById("overlay").classList.add("open");
+}
+
+function closeModals() {
+  if (state.busy) return;      // a run in flight must not be dismissed
+  MODALS.forEach(function (m) { document.getElementById(m).classList.remove("open"); });
+  document.getElementById("overlay").classList.remove("open");
+  state.modalFor = null;
 }
 
 function debounce(fn, ms) {
@@ -484,8 +544,17 @@ function render(data) {
     ? '<span class="badge ok">plan is valid</span>'
     : '<span class="badge bad">plan has problems</span>';
   document.getElementById("fingerprint").textContent = data.fingerprint;
-  // Stays disabled regardless of validity: Phase 2 has no execute endpoint.
-  document.getElementById("rename-btn").disabled = true;
+
+  // The plan the confirmation dialog and /api/execute are built from, kept as
+  // the server returned it so the fingerprint sent back is the one the user
+  // was actually looking at.
+  state.lastPlan = data;
+  const actionable = data.ok && (data.move_count > 0 || data.show_dir_changes);
+  const btn = document.getElementById("rename-btn");
+  btn.disabled = !actionable;
+  btn.title = data.ok
+    ? (actionable ? "" : "Nothing would change")
+    : "Fix the problems listed below first";
 }
 
 // ── Episode matrix ─────────────────────────────────────────────────────────
@@ -504,25 +573,152 @@ function openMatrix(sourceName, current) {
     b.onclick = function () { setEpisode(parseInt(b.dataset.ep, 10)); };
   });
   document.getElementById("modal-input").value = current || "";
-  document.getElementById("overlay").classList.add("open");
-  document.getElementById("modal").classList.add("open");
-}
-
-function closeMatrix() {
-  document.getElementById("overlay").classList.remove("open");
-  document.getElementById("modal").classList.remove("open");
-  state.modalFor = null;
+  showModal("modal");
 }
 
 function setEpisode(n) {
-  if (!state.modalFor || !(n >= 1)) { closeMatrix(); return; }
+  if (!state.modalFor || !(n >= 1)) { closeModals(); return; }
   // Picking a number anchors this row and drops anchors below it, so the pick
   // cascades forward and earlier rows are left alone (README).
   const idx = state.files.indexOf(state.modalFor);
   state.files.slice(idx + 1).forEach(function (name) { delete state.anchors[name]; });
   state.anchors[state.modalFor] = n;
-  closeMatrix();
+  closeModals();
   plan(currentPayload());
+}
+
+// ── Executing ──────────────────────────────────────────────────────────────
+
+// A move shows both names; a folder created or removed has only one, and gets
+// no arrow line rather than an arrow pointing at nothing.
+function pairRow(from, to, why, op) {
+  return '<div class="pair' + (why ? " failed" : "") + '">' +
+    (op ? '<span class="op">' + esc(op) + "</span> " : "") +
+    '<span class="from mono">' + esc(from) + "</span>" +
+    (to ? '<span class="to mono">' + esc(to) + "</span>" : "") +
+    (why ? '<span class="why">' + esc(why) + "</span>" : "") +
+    "</div>";
+}
+
+// Every pair, spelled out. A dialog that said "42 files will be renamed" would
+// be a dialog nobody can check, and this is the last point at which a wrong
+// season number is still free to fix.
+function openConfirm() {
+  const data = state.lastPlan;
+  if (!data || !data.ok) return;
+  const changing = data.files.filter(function (f) { return !f.unchanged; });
+
+  let banner = "<div><b>" + changing.length + "</b> file(s) will be renamed into " +
+               "<span class='mono'>" + esc(data.season_dir_target) + "</span>.</div>";
+  if (data.show_dir_changes) {
+    banner += "<div>The show folder will be renamed to <span class='mono'>" +
+              esc(data.show_dir_preview) + "</span>.</div>";
+  }
+  if (data.skipped.length) {
+    banner += "<div class='note'>" + data.skipped.length +
+              " file(s) are skipped and stay exactly as they are.</div>";
+  }
+  document.getElementById("confirm-banner").innerHTML = banner;
+  document.getElementById("confirm-pairs").innerHTML =
+    changing.map(function (f) { return pairRow(f.source_name, f.target_name); }).join("");
+  document.getElementById("confirm-fp").textContent = data.fingerprint;
+  showModal("confirm");
+}
+
+async function doExecute() {
+  const data = state.lastPlan;
+  if (!data) return;
+  const payload = currentPayload();
+  // The fingerprint of the plan the user just read, not of whatever the server
+  // recomputes: mismatch is exactly the case this is here to catch.
+  payload.fingerprint = data.fingerprint;
+
+  const go = document.getElementById("confirm-go");
+  go.disabled = true;
+  go.textContent = "Renaming…";
+  state.busy = true;
+  let res, body;
+  try {
+    res = await fetch("/api/execute", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    body = await res.json();
+  } catch (e) {
+    body = { error: String(e) };
+  }
+  state.busy = false;
+  go.disabled = false;
+  go.textContent = "Rename these files";
+  showResult("Rename", body);
+}
+
+function showResult(what, body) {
+  state.manifest = null;
+  const banner = document.getElementById("result-banner");
+  const pairs = document.getElementById("result-pairs");
+  document.getElementById("result-title").textContent = what;
+
+  if (body.error) {
+    banner.className = "banner bad";
+    banner.textContent = body.error;
+    pairs.innerHTML = "";
+  } else if ((body.refused || []).length) {
+    banner.className = "banner bad";
+    banner.innerHTML = "Refused — nothing was changed." +
+      body.refused.map(function (r) { return "<div>" + esc(r) + "</div>"; }).join("");
+    pairs.innerHTML = "";
+  } else {
+    const ops = body.ops || [];
+    const failed = ops.filter(function (o) { return o.error; });
+    banner.className = "banner " + (failed.length ? "bad" : "ok");
+    banner.innerHTML = body.applied + " of " + ops.length +
+      " operation(s) completed" + (failed.length ? ", " + failed.length + " failed" : "") +
+      "." + (body.manifest
+        ? " <span class='note'>Undo manifest <span class='mono'>" +
+          esc(body.manifest) + "</span></span>"
+        : "");
+    pairs.innerHTML = ops.map(function (o) {
+      const from = o.from || "";
+      const to = o.to || "";
+      const label = o.op === "move" ? "" : o.op;
+      return pairRow(from || to, from ? to : "", o.error, label);
+    }).join("");
+    // Undo is offered only for a run that actually did something, and only for
+    // a forward run — undoing an undo is a rename, not a second reversal.
+    if (body.manifest && body.applied > 0 && what === "Rename") {
+      state.manifest = body.manifest;
+    }
+  }
+  document.getElementById("result-undo").style.display = state.manifest ? "" : "none";
+  // Where the files are now: the season folder may be new, and the show folder
+  // may have been renamed under it.
+  state.afterPath = body.season_dir || state.path;
+  showModal("result");
+}
+
+async function doUndo() {
+  if (!state.manifest) return;
+  const btn = document.getElementById("result-undo");
+  btn.disabled = true;
+  btn.textContent = "Undoing…";
+  state.busy = true;
+  let body;
+  try {
+    const res = await fetch("/api/undo", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ manifest: state.manifest }),
+    });
+    body = await res.json();
+  } catch (e) {
+    body = { error: String(e) };
+  }
+  state.busy = false;
+  btn.disabled = false;
+  btn.textContent = "Undo this run";
+  showResult("Undo", body);
 }
 
 // ── Wiring ─────────────────────────────────────────────────────────────────
@@ -541,8 +737,21 @@ document.getElementById("reset-btn").onclick = function () {
 document.getElementById("modal-ok").onclick = function () {
   setEpisode(parseInt(document.getElementById("modal-input").value, 10));
 };
-document.getElementById("modal-cancel").onclick = closeMatrix;
-document.getElementById("overlay").onclick = closeMatrix;
+document.getElementById("modal-cancel").onclick = closeModals;
+document.getElementById("overlay").onclick = closeModals;
+
+document.getElementById("rename-btn").onclick = openConfirm;
+document.getElementById("confirm-cancel").onclick = closeModals;
+document.getElementById("confirm-go").onclick = doExecute;
+document.getElementById("result-undo").onclick = doUndo;
+document.getElementById("result-close").onclick = function () {
+  closeModals();
+  // Re-browse rather than re-plan: the folder the page was pointed at may not
+  // exist under that name any more.
+  state.anchors = {};
+  state.overrides = {};
+  open(state.afterPath || state.path);   // handles both a new hash and the same one
+};
 
 browse(hashPath());
 </script>

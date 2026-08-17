@@ -8,33 +8,60 @@ the operational facts that are not derivable from the code.
 
 ## Status
 
-Phases 1, 2 and 2.5 are complete. **Phase 3 (execute) is next and is the first code that
-can move a real file.** Nothing is deployed as a service yet.
+Phases 1 through 3 are complete: **the code can move real files.** Nothing is deployed as
+a service yet, and the running preview on the VM is still Phase 2 code (see below).
 
 `test_no_module_can_mutate_the_filesystem` in `tests/test_app.py` pins `app.py`,
-`core.py` and `config.py` as non-mutating. When Phase 3 lands, add `execute.py` as the
-single exception — do not relax the rule for the others.
+`core.py` and `config.py` as non-mutating. `execute.py` is the single exception and is
+deliberately absent from that list — do not add the others to it.
 
-## Phase 3, concretely
+## How execution is built
 
-- `execute.py` — the only module allowed to call `os.rename`/`mkdir`.
-- Recompute the plan server-side and compare `Plan.fingerprint()` against the one the
-  browser confirmed; refuse if the directory changed in between.
-- Write the undo manifest (old→new JSON, to `config.undo_dir`) **before** the first move.
-- `POST /api/execute` and `POST /api/undo`; confirmation dialog listing every pair.
-- Not atomic by design: validate everything up front, execute, report per-file results.
-- Order: compute all final paths first, then move files, then container renames.
-- Open question still to settle: whether an emptied `Season YYYY` folder gets removed.
+- `execute.py` is the only module that calls `os.rename`/`mkdir`/`rmdir`.
+- `/api/execute` takes the `/api/plan` body plus the confirmed `fingerprint`, rebuilds
+  the plan from a fresh listing, and refuses on mismatch. `_plan_from_payload` in
+  `app.py` is the single derivation both routes share — keep it that way or the two
+  endpoints will disagree about what the plan is.
+- The manifest is an **ordered op log** (`mkdir`/`move`/`rmdir`/`move_dir`), undone in
+  reverse, each op stamped with what actually happened. Reverse order is what makes the
+  show-folder rename safe to include, since it invalidates every path above it.
+- `core.order_moves` sequences chains and breaks cycles with a parking name. Without it,
+  a renumbered run applied in listing order destroys a file.
+- A manifest that cannot be written refuses the whole run. No undo record, no moves.
+- Settled: an emptied `Season YYYY` **is** removed, but only that form — an emptied
+  `Season 1` stays. Anything left in the folder (a poster, a skipped file) keeps it.
 
 Phase 4 is deploy (`/opt/plex-renamer`, `/etc/plex-renamer/config.ini`, systemd unit,
 port 8101) and proving it on a scratch copy first. Phase 5 is destination show folders,
 confined to the same root *and* same `st_dev`.
 
+## Before the first real run
+
+One pre-existing naming misfire is **fixed**; one remains. Neither was caught by the
+60-folder sweep, and both were one confirmation away from happening:
+
+- ~~**`Specials` is not season 0.**~~ **Fixed.** `parse_season_dir` returns `(0, False)`
+  for `Specials`, and `season_dir_name` calls a newly created season-0 folder `Specials`
+  rather than `Season 00`. The folder-left-alone rule then makes those folders no-ops.
+  Sweep before/after: **81 → 56** folders proposing changes, all 25 of the difference
+  being `Specials`, nothing new started. `Season 00` folders were already handled and are
+  still never renamed.
+- **A folder whose files disagree with each other falls back to the folder name.**
+  By design (README). The one folder where it bites is `Star Wars The Clone Wars`, and the
+  cause is **duplicate media, not naming**: every season holds two complete sets — a bare
+  `.avi` rip (`… - S01E01.avi`) and a 1080p BluRay `.mkv` (`… (2008) - S01E01 - Ambush …`).
+  No show-name/year choice leaves both alone, so whichever one you pick rewrites the other
+  set: 125 changes as it stands, **141** if the folder is given `(2008)` — which also turns
+  `Season 07` and `Specials` (bare set only, currently clean no-ops) into 16 and 9 changes.
+  Nothing collides either way (the bare set has no tail and a different extension), so it
+  is churn, not risk. It is the only show in the library with this shape. The real fix is
+  deciding which set to keep; the renamer cannot help with that.
+
 ## Environment
 
 | | |
 |---|---|
-| Tests | `.venv/bin/python -m pytest tests -q` (112 passing) |
+| Tests | `.venv/bin/python -m pytest tests -q` (162 passing) |
 | Push | `GIT_SSH_COMMAND='ssh -F ~/.ssh/config' git push` — remote uses the **`github-byuchino`** alias; `byuchino` is not this machine's default GitHub account |
 | VM | `ssh handbrake-vm` (`brian@192.168.254.206`), **Python 3.8.10** |
 | Roots | `/mnt/bama/volume1/TV Shows`, `/mnt/bama/volume1/Videos/KIKU` — both on the home NAS |
@@ -46,10 +73,14 @@ runtime annotations. Syntax-check before deploying:
 
 ## The running preview
 
-A read-only preview runs on the VM from `~/plex-renamer-preview/` on port 8101. It is
-**not** the Phase 4 install: hand-started, no systemd, dies on reboot. To redeploy:
+A read-only preview runs on the VM from `~/plex-renamer-preview/` on port 8101, still
+carrying **Phase 2 code**. It is **not** the Phase 4 install: hand-started, no systemd,
+dies on reboot. Copying the current `app.py` there would put a live Rename button on an
+unauthenticated LAN page pointed at the real library, before the scratch-copy proof —
+that is a decision to make deliberately, not a redeploy. `execute.py` must be copied too
+or the app will not import. To redeploy:
 
-    scp -q app.py core.py config.py handbrake-vm:~/plex-renamer-preview/
+    scp -q app.py core.py config.py execute.py handbrake-vm:~/plex-renamer-preview/
     scp -q templates/index.html handbrake-vm:~/plex-renamer-preview/templates/
     ssh handbrake-vm 'PID=$(ss -lptnH "sport = :8101" | grep -o "pid=[0-9]*" | head -1 | cut -d= -f2)
       [ -n "$PID" ] && kill "$PID"; sleep 2
@@ -61,12 +92,18 @@ A read-only preview runs on the VM from `~/plex-renamer-preview/` on port 8101. 
 - **Flask runs without debug, so Jinja does not reload a changed template.** A screenshot
   after editing `templates/index.html` shows the *previous* page. Restart the process
   before concluding the page is broken.
-- **After any change to naming, re-run the real-library sweep.** Point `/api/plan` at ~60
-  real season folders and count how many propose changes. The bar is 58 no-ops, 1 folder
-  with no renameable files, and 1 genuine fix (`S06e01` → `S06E01`). This is the only
-  check that catches "proposes renaming the entire library". Three rules exist because of
-  it, all in README: tails preserved byte-for-byte, show name/year defaulting from the
-  files, and leaving a correctly-numbered season folder alone.
+- **After any change to naming, re-run the real-library sweep.** Point `/api/plan` at
+  real season folders and count how many propose changes. The bar on the original ~60
+  folder subset is 58 no-ops, 1 folder with no renameable files, and 1 genuine fix
+  (`S06e01` → `S06E01`). This is the only check that catches "proposes renaming the
+  entire library". Three rules exist because of it, all in README: tails preserved
+  byte-for-byte, show name/year defaulting from the files, and leaving a correctly-
+  numbered season folder alone.
+- **The sweep is stronger run over both roots and diffed against `HEAD`.** All 599 season
+  folders: 473 no-op, 45 with no renameable files, 81 proposing changes. The absolute
+  numbers are not the check — a byte-identical diff against the pre-change code is. A
+  sweep script (30 lines, drives `/api/plan` through the Flask test client) is quick to
+  rewrite; run it on the VM in `/tmp`, since the NAS roots are not mounted locally.
 - **Duplicate episode numbers are legitimate.** Most KIKU series are broadcast twice and
   Plex records both. This is a neutral note, never an error — blocking on it would reject
   the correct plan for a whole library.

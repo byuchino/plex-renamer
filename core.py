@@ -34,6 +34,14 @@ RE_SHOW_DIR = re.compile(
 
 RE_SEASON_DIR = re.compile(r"^Season\s+(?P<num>\d+)\s*$", re.IGNORECASE)
 
+# Plex's own name for season 0, and what 29 of the 30 season-0 folders in this
+# library are called (the other is 'Season 00'). Without this the word means
+# nothing to the tool, DEFAULT_SEASON applies, and opening a Specials folder
+# proposes renumbering S00 specials into season 1 *and* moving them out into
+# 'Season 01' beside the real episodes.
+RE_SPECIALS_DIR = re.compile(r"^Specials\s*$", re.IGNORECASE)
+SPECIALS_DIR_NAME = "Specials"
+
 # An already-episodic filename: "<head> - S01E04 - <tail>".
 #
 # The head is non-greedy so the FIRST episode marker wins, and the tail is
@@ -93,7 +101,10 @@ def parse_show_dir(name: str) -> Tuple[str, Optional[str], Optional[str], Option
 def parse_season_dir(name: str) -> Tuple[Optional[int], bool]:
     """'Season 03' -> (3, False). 'Season 2026' -> (None, True), because a
     4-digit number there is Plex's 'I don't know the season' marker, not a
-    season 2026. Anything unrecognised -> (None, False)."""
+    season 2026. 'Specials' -> (0, False), Plex's name for season 0. Anything
+    unrecognised -> (None, False)."""
+    if RE_SPECIALS_DIR.match(name.strip()):
+        return 0, False
     m = RE_SEASON_DIR.match(name.strip())
     if not m:
         return None, False
@@ -303,6 +314,19 @@ def build_target_name(show_name: str, year: Optional[str], season: int,
     return "{} - S{}E{}{}{}".format(head, pad(season), pad(episode), tail_raw, suffix)
 
 
+def season_dir_name(season: int) -> str:
+    """What to call a season folder this tool has to create.
+
+    Season 0 becomes 'Specials' rather than 'Season 00' to match the library's
+    own convention (29 `Specials` to 1 `Season 00`); Plex reads both. An
+    existing folder that already denotes the requested season is never renamed
+    either way, so the one real `Season 00` folder here stays as it is.
+    """
+    if season == 0:
+        return SPECIALS_DIR_NAME
+    return "Season {}".format(pad(season))
+
+
 def build_show_dir_name(show_name: str, year: Optional[str],
                         ident: Optional[str], ident_source: str) -> str:
     name = "{} ({})".format(show_name.strip(), year) if year else show_name.strip()
@@ -420,7 +444,7 @@ def build_plan(season_dir: Path,
     if current_season is not None and current_season == season:
         plan.season_dir_target = season_dir
     else:
-        plan.season_dir_target = show_dir / "Season {}".format(pad(season))
+        plan.season_dir_target = show_dir / season_dir_name(season)
     if rename_show_dir:
         plan.show_dir_target = show_dir.parent / build_show_dir_name(
             show_name, year, ident, ident_source)
@@ -466,6 +490,51 @@ def build_plan(season_dir: Path,
 
     _check_collisions(plan)
     return plan
+
+
+# Parking name for a rename cycle. Kept in the same directory as the file it
+# stands in for, so the temporary move cannot cross a filesystem boundary.
+TMP_SUFFIX = ".plex-renamer-tmp-{}"
+
+
+def order_moves(moves: Sequence[Tuple[Path, Path]]) -> List[Tuple[Path, Path]]:
+    """Sequence a set of renames so no move ever lands on a file that has not
+    been moved out of the way yet.
+
+    Renumbering a run of episodes produces chains — E02 becomes E01 while E03
+    becomes E02 — and applying those in listing order would overwrite E01 with
+    E02 and lose a file. A target that is also somebody's source therefore has
+    to wait for that somebody to move first.
+
+    A true cycle (two files swapping names, which needs identical tails and so
+    only happens between already-episodic files) cannot be ordered at all, and
+    is broken by parking one file under a temporary name and moving it on at
+    the end. Both halves are recorded as real moves so the undo manifest can
+    retrace them.
+
+    Pure: this decides an order, it does not move anything.
+    """
+    remaining = list(moves)
+    pending = set(src for src, _ in remaining)
+    out: List[Tuple[Path, Path]] = []
+    parked = 0
+    while remaining:
+        ready = [m for m in remaining if m[1] not in pending]
+        if not ready:
+            src, dst = remaining[0]
+            tmp = src.with_name(src.name + TMP_SUFFIX.format(parked))
+            parked += 1
+            out.append((src, tmp))
+            # src is now free for whoever was waiting on it, and the second half
+            # of the parked move continues to compete for its own target.
+            remaining[0] = (tmp, dst)
+            pending.discard(src)
+            continue
+        for m in ready:
+            out.append(m)
+            remaining.remove(m)
+            pending.discard(m[0])
+    return out
 
 
 def _check_collisions(plan: Plan) -> None:

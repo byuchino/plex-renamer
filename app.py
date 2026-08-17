@@ -1,9 +1,9 @@
 """Flask layer.
 
-Read-only. This module has no way to change a media library: it never imports
-execute.py (which does not exist yet), and the only filesystem calls it makes
-are directory listings. `POST /api/plan` computes proposed names and hands them
-back as data — /api/execute and /api/undo arrive in Phase 3.
+Routing and request parsing only. This module computes no names — that is
+core.py — and moves nothing itself: every filesystem change goes through
+execute.py, which is the single module in the repo allowed to make one.
+`POST /api/plan` stays read-only; `POST /api/execute` and `POST /api/undo` act.
 
 The page deliberately does not build filenames in JavaScript. Every keystroke
 in the form comes back here and re-plans, so the naming convention has exactly
@@ -14,11 +14,12 @@ Targets Python 3.8 (the deployment VM).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Flask, jsonify, render_template, request
 
 import core
+import execute
 from config import Config, OutsideRoots, load_config, resolve_within_roots
 
 # Directories that are never useful to browse into and only add noise.
@@ -101,13 +102,30 @@ def _str_or_none(value: Any) -> Optional[str]:
     return text or None
 
 
-def _plan_response(cfg: Config, payload: Dict[str, Any]):
+class BadRequest(Exception):
+    """A request body that cannot be turned into a plan."""
+
+    def __init__(self, message: str, code: int = 400):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+
+def _plan_from_payload(cfg: Config,
+                       payload: Dict[str, Any]) -> Tuple[Path, "core.Defaults",
+                                                          Dict[str, Any], "core.Plan"]:
+    """Request body -> (season dir, derived defaults, resolved inputs, plan).
+
+    /api/execute rebuilds its plan through this same function, from a fresh
+    directory listing, rather than trusting the one the browser is showing —
+    that recomputation is what the fingerprint comparison is checking against.
+    """
     try:
         season_dir = _resolve(cfg, payload.get("path"))
     except OutsideRoots as e:
-        return _error(str(e))
+        raise BadRequest(str(e))
     if not season_dir.is_dir():
-        return _error("not a directory: {}".format(season_dir))
+        raise BadRequest("not a directory: {}".format(season_dir))
 
     entries = _dir_entries(season_dir)
     defaults = core.derive_defaults(season_dir, entries)
@@ -120,20 +138,20 @@ def _plan_response(cfg: Config, payload: Dict[str, Any]):
     ident = _str_or_none(payload["ident"]) if "ident" in payload else defaults.ident
     ident_source = payload.get("ident_source") or defaults.ident_source
     if ident_source not in ("tmdb", "tvdb"):
-        return _error("ident_source must be tmdb or tvdb")
+        raise BadRequest("ident_source must be tmdb or tvdb")
 
     try:
         season = int(payload["season"]) if "season" in payload else defaults.season
         per_episode = int(payload.get("per_episode", 1))
     except (TypeError, ValueError):
-        return _error("season and per_episode must be whole numbers")
+        raise BadRequest("season and per_episode must be whole numbers")
 
     anchors: Dict[str, int] = {}
     for name, value in (payload.get("anchors") or {}).items():
         try:
             anchors[str(name)] = int(value)
         except (TypeError, ValueError):
-            return _error("episode anchor for {} is not a number".format(name))
+            raise BadRequest("episode anchor for {} is not a number".format(name))
 
     overrides: Dict[str, str] = {
         str(k): str(v) for k, v in (payload.get("name_overrides") or {}).items()
@@ -153,19 +171,29 @@ def _plan_response(cfg: Config, payload: Dict[str, Any]):
         name_overrides=overrides,
     )
 
+    inputs = {
+        "show_name": show_name,
+        "year": year,
+        "season": season,
+        "ident": ident,
+        "ident_source": ident_source,
+        "per_episode": per_episode,
+        "rename_show_dir": bool(payload.get("rename_show_dir")),
+    }
+    return season_dir, defaults, inputs, plan
+
+
+def _plan_response(cfg: Config, payload: Dict[str, Any]):
+    try:
+        season_dir, defaults, inputs, plan = _plan_from_payload(cfg, payload)
+    except BadRequest as e:
+        return _error(e.message, e.code)
+
     return jsonify({
         "path": str(season_dir),
         # Echoed back so the form can populate itself on first load from the
         # same derivation the plan used, rather than a second one in JS.
-        "inputs": {
-            "show_name": show_name,
-            "year": year,
-            "season": season,
-            "ident": ident,
-            "ident_source": ident_source,
-            "per_episode": per_episode,
-            "rename_show_dir": bool(payload.get("rename_show_dir")),
-        },
+        "inputs": inputs,
         "season_dir_was_year": defaults.season_dir_was_year,
         "season_dir_target": str(plan.season_dir_target) if plan.season_dir_target else None,
         "show_dir_target": str(plan.show_dir_target) if plan.show_dir_target else None,
@@ -173,7 +201,14 @@ def _plan_response(cfg: Config, payload: Dict[str, Any]):
         # is ticked — the checkbox is unreadable if the name it offers only
         # appears after you have already agreed to it.
         "show_dir_current": season_dir.parent.name,
-        "show_dir_preview": core.build_show_dir_name(show_name, year, ident, ident_source),
+        # Whether ticking the box would actually move the folder. A show folder
+        # already carrying the right name makes the tick a no-op, and the Rename
+        # button must not light up for a run with nothing in it.
+        "show_dir_changes": bool(plan.show_dir_target is not None
+                                 and plan.show_dir_target != season_dir.parent),
+        "show_dir_preview": core.build_show_dir_name(
+            inputs["show_name"], inputs["year"], inputs["ident"],
+            inputs["ident_source"]),
         "files": [
             {
                 "source": str(f.source),
@@ -255,6 +290,51 @@ def create_app(config: Optional[Config] = None) -> Flask:
         if not isinstance(payload, dict):
             return _error("expected a JSON object")
         return _plan_response(cfg, payload)
+
+    @app.route("/api/execute", methods=["POST"])
+    def execute_route():
+        """Apply the plan the browser confirmed — if it is still that plan.
+
+        The body is the same one /api/plan takes, plus the fingerprint of what
+        the user actually agreed to. The plan is rebuilt here from a fresh
+        listing and its fingerprint compared, so a folder that changed between
+        the confirmation dialog and this request is refused whole rather than
+        half-applied against a stale set of names.
+        """
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return _error("expected a JSON object")
+        confirmed = payload.get("fingerprint")
+        if not confirmed:
+            return _error("missing plan fingerprint")
+        try:
+            _dir, _defaults, _inputs, plan = _plan_from_payload(cfg, payload)
+        except BadRequest as e:
+            return _error(e.message, e.code)
+        if plan.fingerprint() != confirmed:
+            return jsonify({
+                "error": "This folder changed since the plan was confirmed. "
+                         "Nothing was renamed — review the new plan and try again.",
+                "fingerprint": plan.fingerprint(),
+            }), 409
+
+        result = execute.execute_plan(plan, cfg.roots, cfg.undo_dir)
+        # 409 is 'refused, nothing touched'. A run that started and hit a
+        # per-file error is a 200 carrying its own report: the caller needs the
+        # detail, not a status code.
+        return jsonify(result.to_json()), (409 if result.refused else 200)
+
+    @app.route("/api/undo", methods=["POST"])
+    def undo_route():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return _error("expected a JSON object")
+        try:
+            result = execute.undo(str(payload.get("manifest") or ""),
+                                  cfg.undo_dir, cfg.roots)
+        except execute.ManifestError as e:
+            return _error(str(e), 404)
+        return jsonify(result.to_json()), (409 if result.refused else 200)
 
     return app
 

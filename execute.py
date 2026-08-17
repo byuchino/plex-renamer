@@ -47,6 +47,12 @@ OP_MKDIR = "mkdir"       # a season folder this run created
 OP_MOVE = "move"         # a file rename
 OP_RMDIR = "rmdir"       # the emptied source season folder
 OP_MOVE_DIR = "move_dir"  # the opt-in show folder rename
+# The opt-in season folder rename. A distinct tag rather than a second
+# OP_MOVE_DIR: _final_paths has to tell the two apart to report where the run
+# ended up, and one tag meaning two different containers is how that goes wrong
+# quietly. An older build reading a manifest with this op refuses to reverse
+# that one op rather than misreading it, which is the safe direction.
+OP_MOVE_SEASON_DIR = "move_season_dir"
 
 
 class ManifestError(Exception):
@@ -180,7 +186,7 @@ def preflight(plan: core.Plan, roots: Sequence[Path]) -> List[str]:
             problems.append("{}: {}".format(f.source.name, issue))
 
     show_dir = _show_dir_to_rename(plan)
-    if not plan.moves and show_dir is None:
+    if not plan.moves and show_dir is None and plan.season_dir_rename_to is None:
         problems.append("Nothing to rename — no file would change.")
         return problems
 
@@ -192,6 +198,8 @@ def preflight(plan: core.Plan, roots: Sequence[Path]) -> List[str]:
         candidates.extend((src, dst))
     if plan.season_dir_target is not None:
         candidates.append(plan.season_dir_target)
+    if plan.season_dir_rename_to is not None:
+        candidates.append(plan.season_dir_rename_to)
     if show_dir is not None:
         candidates.extend((show_dir, plan.show_dir_target))
     for path in candidates:
@@ -222,6 +230,20 @@ def preflight(plan: core.Plan, roots: Sequence[Path]) -> List[str]:
                 problems.append(
                     "{} and {} are on different filesystems; a rename between "
                     "them is not possible.".format(parent, anchor))
+
+    # The cheap path. /api/plan only offers it when the target is free, but the
+    # folder can appear between reading the page and clicking Rename, and a
+    # rename onto an existing directory is exactly the case os.rename does NOT
+    # refuse on POSIX when the target is an empty dir — so this is a refusal,
+    # not a fallback to the move path. Silently doing the other operation is
+    # what the fingerprint exists to prevent.
+    if plan.season_dir_rename_to is not None:
+        if plan.season_dir_rename_to.exists():
+            problems.append("A folder named {} already exists.".format(
+                plan.season_dir_rename_to.name))
+        if not _writable(plan.season_dir_target.parent):
+            problems.append("Cannot write to {}.".format(
+                plan.season_dir_target.parent))
 
     if show_dir is not None:
         if plan.show_dir_target.exists():
@@ -267,6 +289,15 @@ def plan_operations(plan: core.Plan) -> List[Operation]:
         if was_year and dest is not None and dest != source_dir:
             ops.append(Operation(op=OP_RMDIR, dst=str(source_dir)))
 
+    # The season folder itself, when the cheap path was opted into. After the
+    # files above, for the same reason the show rename is last: it invalidates
+    # every path recorded before it, and undo walks the log backwards. Before
+    # the show rename, since this folder lives inside that one.
+    if plan.season_dir_rename_to is not None:
+        ops.append(Operation(op=OP_MOVE_SEASON_DIR,
+                             src=str(plan.season_dir_target),
+                             dst=str(plan.season_dir_rename_to)))
+
     show_dir = _show_dir_to_rename(plan)
     if show_dir is not None:
         ops.append(Operation(op=OP_MOVE_DIR, src=str(show_dir),
@@ -279,7 +310,11 @@ def _final_paths(plan: core.Plan, ops: Sequence[Operation]):
     season = plan.season_dir_target
     show = season.parent if season is not None else None
     for op in ops:
-        if op.op == OP_MOVE_DIR:
+        if op.op == OP_MOVE_SEASON_DIR:
+            # Renamed in place, so only the leaf changes; the show folder above
+            # it may still be renamed by a later op.
+            season = Path(op.dst)
+        elif op.op == OP_MOVE_DIR:
             show = Path(op.dst)
             if season is not None:
                 season = show / season.name
@@ -441,7 +476,7 @@ def _apply(op: Operation) -> None:
     try:
         if op.op == OP_MKDIR:
             Path(op.dst).mkdir(parents=True, exist_ok=True)
-        elif op.op in (OP_MOVE, OP_MOVE_DIR):
+        elif op.op in (OP_MOVE, OP_MOVE_DIR, OP_MOVE_SEASON_DIR):
             src, dst = Path(op.src), Path(op.dst)
             if not src.exists():
                 op.error = "{} is no longer there".format(src.name)
@@ -620,7 +655,7 @@ def undo(name: str, undo_dir: Path, roots: Sequence[Path]) -> Result:
     log.info("undo START %s: reversing %d operation(s)", name, len(applied))
     reversed_ops: List[Operation] = []
     for op in reversed(applied):
-        if op.op in (OP_MOVE, OP_MOVE_DIR):
+        if op.op in (OP_MOVE, OP_MOVE_DIR, OP_MOVE_SEASON_DIR):
             back = Operation(op=op.op, src=op.dst, dst=op.src)
         elif op.op == OP_MKDIR:
             back = Operation(op=OP_RMDIR, dst=op.dst)

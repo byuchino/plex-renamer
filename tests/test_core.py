@@ -721,3 +721,58 @@ def test_an_existing_season_00_folder_is_not_renamed_to_specials(tmp_path):
                            show_name="Some Show", year="2015", season=0)
     assert plan.season_dir_target == season
     assert plan.moves == []
+
+
+# ── The opt-in season folder rename ────────────────────────────────────────
+
+def test_season_rename_targets_the_folder_and_keeps_files_in_place():
+    """season_dir_target stays the folder as browsed, so every file target is a
+    rename within one directory; the folder itself carries the new name."""
+    plan = a_plan(rename_season_dir=True)
+    assert plan.season_dir_target == SEASON_DIR
+    assert plan.season_dir_rename_to == SEASON_DIR.parent / "Season 01"
+    assert all(f.target.parent == SEASON_DIR for f in plan.files)
+
+
+def test_season_rename_reaches_the_same_filenames_as_the_move_path():
+    """The checkbox chooses a route, never a name. If these diverge it has
+    quietly become a naming control."""
+    assert ([f.target.name for f in a_plan().files] ==
+            [f.target.name for f in a_plan(rename_season_dir=True).files])
+
+
+def test_season_rename_changes_the_fingerprint():
+    """Same end state, different op set. Confirming one must not execute the
+    other, and the fingerprint is the only thing standing between them."""
+    assert a_plan().fingerprint() != a_plan(rename_season_dir=True).fingerprint()
+
+
+def test_season_rename_is_ignored_on_a_folder_that_is_not_a_year():
+    """The move-don't-rename rule still holds everywhere else: only the
+    year-fallback form is ever renamed."""
+    season = Path("/lib/Some Show (2019)/Season 1")
+    plan = core.build_plan(
+        season_dir=season,
+        entries=[season / "Some Show (2019) - 2026-06-22 23 00 00.mp4"],
+        show_name="Some Show", year="2019", season=2, rename_season_dir=True)
+    assert plan.season_dir_rename_to is None
+    assert plan.season_dir_target == season.parent / "Season 02"
+
+
+@pytest.mark.parametrize("folder,season,exists,ok", [
+    ("Season 2026", 1, False, True),    # the case it exists for
+    ("Season 2026", 1, True,  False),   # cannot rename onto an occupied name
+    ("Season 01",   1, False, False),   # already there, nothing to make cheaper
+    ("Season 1",    2, False, False),   # a real season folder is never renamed
+    ("Specials",    0, False, False),
+])
+def test_season_rename_state(folder, season, exists, ok):
+    available, reason = core.season_rename_state(folder, season, exists)
+    assert available is ok
+    # A hidden checkbox with no explanation is the thing this replaces.
+    assert (reason == "") is ok
+
+
+def test_season_rename_state_names_the_folder_that_is_in_the_way():
+    _, reason = core.season_rename_state("Season 2026", 1, True)
+    assert "Season 01" in reason

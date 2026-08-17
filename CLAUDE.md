@@ -14,6 +14,9 @@ to move real files.** 233 tests.
 Multi-episode support (`episodes_per_file`, see below) is deployed. `main` is pushed and
 `/opt/plex-renamer` matches `HEAD` byte for byte (checked by md5).
 
+The season folder rename (`rename_season_dir`, see below) is deployed — the cheap path for
+the tool's primary case.
+
 **Resume here — nothing is half-finished; these are choices, not chores:**
 
 1. **Phase 5, the next build:** destination show folders, so the duplicate show folders in
@@ -75,6 +78,50 @@ span off the filename. See README for the full rules. The facts worth not redisc
 - The UI label is **"Episodes per file"**, deliberately not "episodes per airing": beside
   "Airings per episode" that is the same words reordered, and reading the two backwards
   renames a whole folder the wrong way.
+
+## Season folder rename (`rename_season_dir`, added 2026-08-17)
+
+The cheap path for the tool's primary case. Ticked, a `Season YYYY` folder is **renamed**
+to `Season <nn>` and its files are renamed **inside it**, so nothing crosses a directory
+boundary and the sync propagates a true rename instead of re-uploading every file. Opt-in,
+defaulted off. Facts worth not rediscovering:
+
+- **"Every file goes to the same season" was never a condition that could fail.**
+  `build_plan` takes one `season` and every row targets one `dest_dir`; the file list is
+  server-side (`_dir_entries`), there is no per-row exclude, and `check_override` rejects
+  path separators. README's justification for move-don't-rename — "so one year folder can
+  later be split across seasons" — is preserving a capability that does not exist. That is
+  why the opt-in is safe; it is **not** a licence to widen the general rule.
+- **The two routes reach byte-identical filenames.** Pinned by a test in both
+  `test_core.py` and `test_execute.py`. If they ever diverge the checkbox has silently
+  become a naming control, which is the failure mode to watch for.
+- **So the fingerprint had to learn the difference.** Same end state, different op set —
+  `season_dir_rename_to` is in `Plan.fingerprint()` specifically so a plan confirmed as a
+  move cannot execute as a rename.
+- **The real gating condition is that `Season <nn>` must not already exist.** `os.rename`
+  onto an empty directory *succeeds* on POSIX, so `preflight` refuses it explicitly rather
+  than relying on the filesystem to object. It is a refusal, never a quiet fallback to the
+  move path.
+- **Leftovers travel with the folder.** The one visible difference from the move path, and
+  the whole reason the page states the consequence in both states. They come from the
+  **listing**, not `plan.skipped`, because `collect_files` drops subdirectories silently —
+  and a subdirectory both blocks the `rmdir` and rides along on a rename, so using
+  `skipped` would make the page promise a cleanup that cannot happen.
+- **Hidden, not disabled, when it cannot apply — but the reason is still shown.**
+  `core.season_rename_state` owns the wording and takes `target_exists` as an argument, so
+  `build_plan` stays free of disk reads and every branch is testable without a library.
+  `app.py` supplies the filesystem fact. "`Season 01` already exists, so this folder cannot
+  be renamed onto it" is the sentence that explains why the expensive path is the only one
+  on offer.
+- **Asking for it when it does not apply is ignored, not refused** — a page left open while
+  the folder changed underneath plans the move path instead of failing. `inputs` records
+  the *gated* value, so the manifest says what the run did, not what the browser asked.
+- **The confirm dialog's "skipped files stay exactly as they are" was a false assurance**
+  under this path and now says "move with the folder" instead. The toggle itself stays in
+  the main panel: a toggle in the dialog would re-plan and change the fingerprint the
+  dialog exists to pin.
+- **The sweep came back byte-identical** against `HEAD` over all 603 season folders
+  (499 no-op, 55 proposing changes, 49 with no renameable files). Inert unless opted into.
 
 ## History and logging
 
@@ -241,17 +288,11 @@ episode will probably cost its watched flag; that is a known price.
   is metadata only. The three cases are directly comparable and the signal is
   unambiguous.
 
-  **So the mitigation works and is worth building.** A `Season YYYY` folder whose files
-  all land in one season should be handled by **renaming the folder** — cheap — instead of
-  creating `Season 01`, moving every file into it, and removing the emptied original,
-  which is what costs 4.6 GB. Files can then be renamed in place inside it, also cheap.
-  README rejected folder-renaming outright so that one year folder can be split across
-  seasons; this has to stay a **narrow special case** (year-fallback form, every file
-  going to the same season, source folder would be emptied and removed anyway), not a
-  change to the general rule. Not built yet.
+  **The mitigation is built** — see the section below.
 
   Sync is two-way, is event-driven and quick to react, and does **not** propagate POSIX
-  permissions.
+  permissions. **Both roots sync**, not just KIKU: `TV Shows` is mirrored to the condo box
+  as well (confirmed 2026-08-17), so the transfer cost is not a KIKU-only concern.
 - **Do not restart the transcode services** (`transcode-watcher`) casually — it kills any
   in-progress local encode. That project is a separate repo at `/home/brian/handbrake`;
   this tool never touches its `jobs.db`.

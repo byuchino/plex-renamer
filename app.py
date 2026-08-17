@@ -169,6 +169,16 @@ def _plan_from_payload(cfg: Config,
         str(k): str(v) for k, v in (payload.get("name_overrides") or {}).items()
     }
 
+    # Whether the cheap path is even on offer. The disk fact lives here rather
+    # than in core so build_plan stays free of filesystem reads; core owns the
+    # rules and the wording. Asking for it when it does not apply is ignored
+    # rather than refused — a page left open while the folder changed underneath
+    # should quietly fall back to the move path, not fail to plan at all.
+    season_rename_ok, season_rename_why = core.season_rename_state(
+        season_dir.name, season,
+        (season_dir.parent / core.season_dir_name(season)).exists())
+    rename_season_dir = bool(payload.get("rename_season_dir")) and season_rename_ok
+
     plan = core.build_plan(
         season_dir=season_dir,
         entries=entries,
@@ -181,8 +191,35 @@ def _plan_from_payload(cfg: Config,
         per_episode=per_episode,
         episodes_per_file=episodes_per_file,
         rename_show_dir=bool(payload.get("rename_show_dir")),
+        rename_season_dir=rename_season_dir,
         name_overrides=overrides,
     )
+    # Everything in the folder that the plan does not move. Taken from the
+    # listing rather than from plan.skipped because collect_files drops
+    # subdirectories silently — and a subdirectory both keeps the rmdir from
+    # succeeding and rides along on a folder rename, so leaving it out would
+    # make the page promise a cleanup that will not happen.
+    leaving = set(pf.source for pf in plan.files)
+    leftovers = sorted(p.name for p in entries if p not in leaving)
+    moves_out = plan.season_dir_target != season_dir
+
+    # Presentation state, not plan state: kept out of core.Plan so the plan
+    # stays exactly the set of changes and nothing about how to describe them.
+    folder_rename = {
+        "available": season_rename_ok,
+        "reason": season_rename_why,
+        "requested": rename_season_dir,
+        "from": season_dir.name,
+        "to": core.season_dir_name(season),
+        # Named so the description can say which files ride along instead of
+        # saying "some files" — that is the sentence the decision turns on.
+        "leftovers": leftovers,
+        "moves_out": moves_out,
+        # Mirrors plan_operations' rmdir condition exactly: year-fallback form,
+        # files actually leaving, and nothing left behind to hold it open.
+        "source_removed": bool(defaults.season_dir_was_year and moves_out
+                               and plan.files and not leftovers),
+    }
 
     inputs = {
         "show_name": show_name,
@@ -193,13 +230,17 @@ def _plan_from_payload(cfg: Config,
         "per_episode": per_episode,
         "episodes_per_file": episodes_per_file,
         "rename_show_dir": bool(payload.get("rename_show_dir")),
+        # The gated value, not the requested one, so the manifest records what
+        # the run actually did.
+        "rename_season_dir": rename_season_dir,
     }
-    return season_dir, defaults, inputs, plan
+    return season_dir, defaults, inputs, plan, folder_rename
 
 
 def _plan_response(cfg: Config, payload: Dict[str, Any]):
     try:
-        season_dir, defaults, inputs, plan = _plan_from_payload(cfg, payload)
+        season_dir, defaults, inputs, plan, folder_rename = _plan_from_payload(
+            cfg, payload)
     except BadRequest as e:
         return _error(e.message, e.code)
 
@@ -210,6 +251,9 @@ def _plan_response(cfg: Config, payload: Dict[str, Any]):
         "inputs": inputs,
         "season_dir_was_year": defaults.season_dir_was_year,
         "season_dir_target": str(plan.season_dir_target) if plan.season_dir_target else None,
+        "season_dir_rename_to": (str(plan.season_dir_rename_to)
+                                 if plan.season_dir_rename_to else None),
+        "folder_rename": folder_rename,
         "show_dir_target": str(plan.show_dir_target) if plan.show_dir_target else None,
         # What the show folder *would* become, computed whether or not the box
         # is ticked — the checkbox is unreadable if the name it offers only
@@ -323,7 +367,8 @@ def create_app(config: Optional[Config] = None) -> Flask:
         if not confirmed:
             return _error("missing plan fingerprint")
         try:
-            season_dir, _defaults, inputs, plan = _plan_from_payload(cfg, payload)
+            season_dir, _defaults, inputs, plan, _fr = _plan_from_payload(
+                cfg, payload)
         except BadRequest as e:
             return _error(e.message, e.code)
         if plan.fingerprint() != confirmed:

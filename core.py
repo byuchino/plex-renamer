@@ -42,6 +42,10 @@ RE_SEASON_DIR = re.compile(r"^Season\s+(?P<num>\d+)\s*$", re.IGNORECASE)
 RE_SPECIALS_DIR = re.compile(r"^Specials\s*$", re.IGNORECASE)
 SPECIALS_DIR_NAME = "Specials"
 
+# How the fallback form is written when explaining it to the user. The real
+# folders carry a concrete year ('Season 2026'); this is the shape, for prose.
+YEAR_FALLBACK_EXAMPLE = "Season YYYY"
+
 # An already-episodic filename: "<head> - S01E04 - <tail>", or a multi-episode
 # one, "<head> - S01E01-E02 - <tail>".
 #
@@ -311,6 +315,11 @@ class Plan:
     files: List[PlannedFile] = field(default_factory=list)
     skipped: List[Tuple[Path, str]] = field(default_factory=list)
     season_dir_target: Optional[Path] = None
+    # Set only in the opt-in cheap path: the season folder itself is renamed to
+    # this, after its files have been renamed in place inside it. When it is
+    # set, season_dir_target is the folder as browsed — so every file target is
+    # a rename within one directory and nothing crosses a boundary.
+    season_dir_rename_to: Optional[Path] = None
     show_dir_target: Optional[Path] = None
     issues: List[str] = field(default_factory=list)
     # Non-blocking observations. Unlike issues, these never prevent a rename.
@@ -332,7 +341,11 @@ class Plan:
         for src, dst in sorted((str(a), str(b)) for a, b in self.moves):
             h.update(src.encode("utf-8")); h.update(b"\0")
             h.update(dst.encode("utf-8")); h.update(b"\0")
-        for d in (self.season_dir_target, self.show_dir_target):
+        # season_dir_rename_to is part of the identity even though it never
+        # changes a file target: the two paths to the same end state are
+        # different op sets, and confirming one must not execute the other.
+        for d in (self.season_dir_target, self.season_dir_rename_to,
+                  self.show_dir_target):
             h.update((str(d) if d else "").encode("utf-8")); h.update(b"\0")
         return h.hexdigest()[:16]
 
@@ -375,6 +388,35 @@ def season_dir_name(season: int) -> str:
     if season == 0:
         return SPECIALS_DIR_NAME
     return "Season {}".format(pad(season))
+
+
+def season_rename_state(season_dir_name_: str,
+                        season: int,
+                        target_exists: bool) -> Tuple[bool, str]:
+    """Whether the season folder may be renamed instead of emptied, and why not.
+
+    Pure by design: `target_exists` arrives as an argument rather than being
+    read off the disk here, so build_plan's "reads nothing except the listing it
+    is given" property survives and every branch below is testable without a
+    media library. app.py supplies the filesystem fact.
+
+    The reason is shown in place of the hidden checkbox. A control that is inert
+    on most folders trains the eye to skip it; a sentence saying which condition
+    failed is the part that was actually worth showing.
+    """
+    current, was_year = parse_season_dir(season_dir_name_)
+    target = season_dir_name(season)
+    if current is not None and current == season:
+        return False, ("Files are renamed where they are — no folder move is "
+                       "involved, so there is nothing to make cheaper.")
+    if not was_year:
+        return False, ("Only a '{}' folder is renamed. Renaming '{}' would move "
+                       "a folder you did not ask about.".format(
+                           YEAR_FALLBACK_EXAMPLE, season_dir_name_))
+    if target_exists:
+        return False, ("'{}' already exists, so this folder cannot be renamed "
+                       "onto it. Files move into it instead.".format(target))
+    return True, ""
 
 
 def build_show_dir_name(show_name: str, year: Optional[str],
@@ -489,6 +531,7 @@ def build_plan(season_dir: Path,
                per_episode: int = 1,
                episodes_per_file: int = 1,
                rename_show_dir: bool = False,
+               rename_season_dir: bool = False,
                name_overrides: Optional[Dict[str, str]] = None) -> Plan:
     """The whole proposal, as data. Reads nothing from disk except the listing
     it is given, so it is fully testable without a media library.
@@ -511,9 +554,18 @@ def build_plan(season_dir: Path,
     # common here), and always targeting the padded form would propose moving
     # every file out of a perfectly good 'Season 1' into a second folder,
     # splitting the season in two.
-    current_season, _ = parse_season_dir(season_dir.name)
+    #
+    # Unless the cheap path is opted into: then the folder IS renamed, files are
+    # renamed in place inside it, and nothing crosses a directory boundary — the
+    # sync propagates that as a true rename rather than a full re-upload. Only
+    # the year-fallback form qualifies, so the splitting case above still holds
+    # for every folder that is already named after a real season.
+    current_season, was_year = parse_season_dir(season_dir.name)
     if current_season is not None and current_season == season:
         plan.season_dir_target = season_dir
+    elif rename_season_dir and was_year:
+        plan.season_dir_target = season_dir
+        plan.season_dir_rename_to = show_dir / season_dir_name(season)
     else:
         plan.season_dir_target = show_dir / season_dir_name(season)
     if rename_show_dir:

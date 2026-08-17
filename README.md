@@ -149,6 +149,27 @@ file — it is left alone. Only the year-fallback form is cleaned up: an emptied
 `Season 1` stays, because removing a folder the user did not ask about is the greater
 surprise.
 
+**Season folder rename is opt-in** via checkbox, and is the cheap path. Ticked, a
+`Season YYYY` folder is *renamed* to `Season <nn>` and its files are renamed **inside it**;
+nothing crosses a directory boundary, which the sync propagates as a true rename instead of
+a full re-upload (see the transfer note below). The end state is byte-identical to the move
+path — same folder name, same filenames — so this changes only how it gets there, plus one
+visible difference: **files this tool does not rename travel with the folder** rather than
+being stranded in a surviving `Season YYYY`. That difference is stated in the page, in both
+states, because it is the whole reason to think before ticking.
+
+It is offered only when it applies: the folder is the `Season YYYY` fallback form, and
+`Season <nn>` does not already exist. When it does not apply the checkbox is **hidden and
+replaced by the reason** — an inert control teaches nothing, but "`Season 01` already
+exists, so this folder cannot be renamed onto it" explains exactly why the expensive path
+is the only one on offer. `core.season_rename_state` owns those strings and takes
+`target_exists` as an argument, so it stays disk-free and testable; `app.py` supplies the
+filesystem fact.
+
+Defaulted **off**: it changes where unrenamed files end up, which should not happen
+unasked. The general move-don't-rename rule above is unchanged — this is a narrow
+opt-in beside it, not a replacement.
+
 **Show folder rename is opt-in** via checkbox. When ticked the folder becomes
 `<Show Name> (<Year>) {id}` from all three inputs. Opt-in specifically so a typo in
 Show Name cannot silently rename a directory containing other seasons not visible on
@@ -274,8 +295,10 @@ the page reachable in one step from a headless browser.
 | Config | `/etc/plex-renamer/config.ini` — allowed roots |
 | Initial roots | `/mnt/bama/volume1/TV Shows`, `/mnt/bama/volume1/Videos/KIKU` |
 
-**Both roots are on the home nas.** The condo nas has its own copy of the KIKU library,
-but the two boxes sync it between themselves, so renaming the local copy is enough. The
+**Both roots are on the home nas.** The condo nas has its own copy, and the two boxes sync
+between themselves, so renaming the local copy is enough. **Both roots sync, not just
+KIKU** — `TV Shows` is mirrored to the condo box as well (confirmed 2026-08-17), so the
+transfer cost below applies to every folder this tool touches, not only the KIKU tree. The
 tool itself never touches the WireGuard tunnel — unlike the transcode pipeline, it has no
 remote-mount failure mode.
 
@@ -292,10 +315,7 @@ recordings. Measured again with a 64 MB probe, reading the inode on the receivin
 
 (A fresh 64 MB upload takes 57 s, so 49 s is a full re-transfer.) None of this is a
 correctness problem — the plan, the manifest and undo are unaffected. It is a bandwidth
-cost, and an avoidable one: a `Season YYYY` folder whose files all land in one season
-could be handled by **renaming the folder** rather than moving the files out of it.
-That would have to be a narrow special case of the move-don't-rename rule above — it is
-only safe when every file goes to the same season — and it is **not built**.
+cost, and an avoidable one. **Rename the season folder** is the opt-in answer, below.
 
 They are still **separate NFS exports** (`TV Shows` and `Videos` are exported
 independently, `st_dev` 40 and 41), so `os.rename` between the two roots fails with

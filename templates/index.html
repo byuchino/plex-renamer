@@ -250,6 +250,14 @@
       <input type="checkbox" id="f-renamedir">
       <label for="f-renamedir">Also rename the show folder <span class="mono" id="showdir-preview">—</span></label>
     </div>
+    <!-- Hidden, not disabled, when it cannot apply: an inert control on most
+         folders teaches the eye to skip it. The reason line below takes its
+         place, which is the part that was worth showing. -->
+    <div class="checkrow" id="seasonrename-row" style="display:none">
+      <input type="checkbox" id="f-renameseason">
+      <label for="f-renameseason">Rename the season folder instead of moving the files <span class="mono" id="seasonrename-preview">—</span></label>
+    </div>
+    <div class="pad note" id="seasonrename-why" style="display:none"></div>
     <div class="pad note" id="dest-line"></div>
   </section>
 
@@ -504,6 +512,7 @@ function currentPayload() {
     per_episode: document.getElementById("f-per").value,
     episodes_per_file: document.getElementById("f-epf").value,
     rename_show_dir: document.getElementById("f-renamedir").checked,
+    rename_season_dir: document.getElementById("f-renameseason").checked,
     anchors: state.anchors,
     name_overrides: state.overrides,
   };
@@ -524,6 +533,35 @@ async function plan(payload) {
 }
 
 const replan = debounce(function () { plan(currentPayload()); }, 250);
+
+// What this run does to the folders, stated in full whether or not the season
+// rename is ticked — the checkbox is only readable as a comparison, and the
+// sentence that makes someone tick it is the one about what gets left behind.
+//
+// Assembles server-supplied names; it never derives one. Composing a filename
+// here would be a second implementation of the naming convention, which is what
+// keeps that work on the server (README).
+function consequence(data, fr) {
+  const mono = function (s) { return "<span class='mono'>" + esc(s) + "</span>"; };
+  const names = (fr.leftovers || []).map(mono).join(", ");
+  const verb = (fr.leftovers || []).length === 1 ? "moves" : "move";
+
+  if (data.season_dir_rename_to) {
+    return mono(fr.from) + " is renamed to " + mono(fr.to) +
+      "; files are renamed inside it. Nothing crosses a folder boundary." +
+      (names ? " " + names + " " + verb + " with the folder." : "");
+  }
+  if (!fr.moves_out) {
+    return "Files are renamed in " + mono(data.season_dir_target) + ".";
+  }
+  let s = "Files move into " + mono(data.season_dir_target) + ".";
+  if (fr.source_removed) {
+    s += " " + mono(fr.from) + " is removed.";
+  } else if (names) {
+    s += " " + mono(fr.from) + " stays, holding " + names + ".";
+  }
+  return s;
+}
 
 // "01", or "01-02" for a file holding two episodes. The button opens the
 // matrix on the FIRST episode; the span comes from the folder-wide input, not
@@ -551,8 +589,18 @@ function render(data) {
     data.show_dir_preview === data.show_dir_current
       ? "&mdash; already named <b>" + esc(data.show_dir_current) + "</b>"
       : "<b>" + esc(data.show_dir_current) + "</b> &rarr; <b>" + esc(data.show_dir_preview) + "</b>";
+  const fr = data.folder_rename || {};
+  document.getElementById("f-renameseason").checked =
+    !!data.inputs.rename_season_dir;
+  document.getElementById("seasonrename-row").style.display =
+    fr.available ? "" : "none";
+  const why = document.getElementById("seasonrename-why");
+  why.style.display = (!fr.available && fr.reason) ? "" : "none";
+  why.textContent = fr.reason || "";
+  document.getElementById("seasonrename-preview").innerHTML =
+    "<b>" + esc(fr.from || "") + "</b> &rarr; <b>" + esc(fr.to || "") + "</b>";
   document.getElementById("dest-line").innerHTML =
-    "Files move into <span class='mono'>" + esc(data.season_dir_target) + "</span>" +
+    consequence(data, fr) +
     (data.season_dir_was_year
       ? " &middot; the folder here is a year, so the season was defaulted"
       : "");
@@ -683,15 +731,33 @@ function openConfirm() {
   if (!data || !data.ok) return;
   const changing = data.files.filter(function (f) { return !f.unchanged; });
 
-  let banner = "<div><b>" + changing.length + "</b> file(s) will be renamed into " +
-               "<span class='mono'>" + esc(data.season_dir_target) + "</span>.</div>";
+  // Read-only restatement of what the main panel already showed. The season
+  // rename is decided up there, because a toggle in here would re-plan and
+  // change the fingerprint this dialog exists to pin.
+  const fr = data.folder_rename || {};
+  const renaming = !!data.season_dir_rename_to;
+  const dest = renaming ? data.season_dir_rename_to : data.season_dir_target;
+
+  let banner = "<div><b>" + changing.length + "</b> file(s) will be renamed " +
+               (renaming ? "inside " : "into ") +
+               "<span class='mono'>" + esc(dest) + "</span>.</div>";
+  if (renaming) {
+    banner += "<div>The season folder itself will be renamed: <span class='mono'>" +
+              esc(fr.from) + "</span> &rarr; <span class='mono'>" + esc(fr.to) +
+              "</span>.</div>";
+  }
   if (data.show_dir_changes) {
     banner += "<div>The show folder will be renamed to <span class='mono'>" +
               esc(data.show_dir_preview) + "</span>.</div>";
   }
   if (data.skipped.length) {
+    // Under a folder rename they are not renamed but they do travel, so the
+    // old flat "stay exactly as they are" would be a false assurance here.
     banner += "<div class='note'>" + data.skipped.length +
-              " file(s) are skipped and stay exactly as they are.</div>";
+              (renaming
+                ? " file(s) are not renamed, but move with the folder."
+                : " file(s) are skipped and stay exactly as they are.") +
+              "</div>";
   }
   document.getElementById("confirm-banner").innerHTML = banner;
   document.getElementById("confirm-pairs").innerHTML =
@@ -929,6 +995,7 @@ async function loadRunDetail(run) {
 });
 document.querySelectorAll('input[name=idsrc]').forEach(function (r) { r.onchange = replan; });
 document.getElementById("f-renamedir").onchange = replan;
+document.getElementById("f-renameseason").onchange = replan;
 document.getElementById("dir-filter").oninput = renderDirs;
 document.getElementById("reset-btn").onclick = function () {
   state.anchors = {};

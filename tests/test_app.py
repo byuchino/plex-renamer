@@ -102,6 +102,7 @@ def test_plan_with_only_a_path_derives_every_default(client, library):
         "per_episode": 1,
         "episodes_per_file": 1,
         "rename_show_dir": False,
+        "rename_season_dir": False,        # opt-in, and off unless asked for
     }
     assert data["season_dir_was_year"] is True
     assert data["ok"] is True
@@ -738,3 +739,105 @@ def test_a_browse_error_still_offers_a_way_back_to_the_roots():
     handler = handler[:handler.index("state.dirs = data.dirs")]
     assert 'data-path=""' in handler, "the error path renders no roots button"
     assert "open(null)" in handler, "the roots button is not wired"
+
+
+# ── The opt-in season folder rename ────────────────────────────────────────
+
+def test_plan_offers_the_season_rename_on_a_year_folder(client, library):
+    _, season = library
+    _, data = get_plan(client, path=str(season))
+    fr = data["folder_rename"]
+    assert fr["available"] is True
+    assert fr["reason"] == ""
+    assert (fr["from"], fr["to"]) == ("Season 2026", "Season 01")
+    # Offered, but not taken unless asked for.
+    assert data["season_dir_rename_to"] is None
+    assert data["inputs"]["rename_season_dir"] is False
+
+
+def test_asking_for_the_season_rename_replans_it(client, library):
+    _, season = library
+    _, data = get_plan(client, path=str(season), rename_season_dir=True)
+    assert data["season_dir_rename_to"].endswith("Season 01")
+    assert data["season_dir_target"] == str(season)
+    assert data["inputs"]["rename_season_dir"] is True
+
+
+def test_the_season_rename_is_not_offered_when_the_target_exists(client, library):
+    """The reason replaces the hidden checkbox, and names the folder in the
+    way — otherwise the cheap path just silently vanishes."""
+    _, season = library
+    (season.parent / "Season 01").mkdir()
+    _, data = get_plan(client, path=str(season))
+    fr = data["folder_rename"]
+    assert fr["available"] is False
+    assert "Season 01" in fr["reason"]
+
+
+def test_asking_for_an_unavailable_season_rename_falls_back_quietly(client, library):
+    """A page left open while the folder changed underneath should plan the
+    move path, not fail to plan at all."""
+    _, season = library
+    (season.parent / "Season 01").mkdir()
+    status, data = get_plan(client, path=str(season), rename_season_dir=True)
+    assert status == 200
+    assert data["season_dir_rename_to"] is None
+    # The manifest records what the run did, not what the browser asked for.
+    assert data["inputs"]["rename_season_dir"] is False
+
+
+def test_the_leftovers_are_named_for_the_description(client, library):
+    _, season = library
+    _, data = get_plan(client, path=str(season))
+    fr = data["folder_rename"]
+    assert fr["leftovers"] == ["poster.jpg"]
+    assert fr["moves_out"] is True
+    # The poster holds the folder open, so the move path cannot remove it.
+    assert fr["source_removed"] is False
+
+
+def test_a_folder_with_nothing_left_behind_reports_its_removal(client, library):
+    _, season = library
+    (season / "poster.jpg").unlink()
+    _, data = get_plan(client, path=str(season))
+    assert data["folder_rename"]["leftovers"] == []
+    assert data["folder_rename"]["source_removed"] is True
+
+
+def test_a_subdirectory_counts_as_a_leftover(client, library):
+    """collect_files drops directories silently, so taking leftovers from the
+    listing is what stops the page promising a removal that cannot happen."""
+    _, season = library
+    (season / "poster.jpg").unlink()
+    (season / "extras").mkdir()
+    _, data = get_plan(client, path=str(season))
+    assert data["folder_rename"]["leftovers"] == ["extras"]
+    assert data["folder_rename"]["source_removed"] is False
+
+
+def test_executing_a_season_rename_needs_its_own_fingerprint(client, library):
+    """The two routes reach the same names, so only the fingerprint separates
+    them. A fingerprint from the move plan must not execute the rename plan."""
+    _, season = library
+    _, move = get_plan(client, path=str(season))
+    res = client.post("/api/execute", json={
+        "path": str(season), "rename_season_dir": True,
+        "fingerprint": move["fingerprint"]})
+    assert res.status_code == 409
+    assert "changed since the plan was confirmed" in res.get_json()["error"]
+    assert season.is_dir()          # nothing happened
+
+
+def test_a_season_rename_runs_end_to_end(client, library):
+    _, season = library
+    _, data = get_plan(client, path=str(season), rename_season_dir=True)
+    res = client.post("/api/execute", json={
+        "path": str(season), "rename_season_dir": True,
+        "fingerprint": data["fingerprint"]})
+    body = res.get_json()
+    assert body["refused"] == []
+    assert body["ok"] is True
+    dest = season.parent / "Season 01"
+    assert not season.exists()
+    assert (dest / "poster.jpg").is_file()
+    assert body["season_dir"] == str(dest)

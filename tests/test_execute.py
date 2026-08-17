@@ -75,6 +75,97 @@ def test_a_year_folder_with_anything_left_in_it_is_not_removed(tree, undo_dir):
     assert [p.name for p in season.iterdir()] == ["poster.jpg"]
 
 
+# ── The opt-in season folder rename ────────────────────────────────────────
+
+def test_the_season_folder_is_renamed_and_no_file_crosses_a_boundary(tree, undo_dir):
+    """The whole point: the same end state as the move path, reached without a
+    single cross-directory move. That is what the sync propagates as a rename
+    instead of a full re-upload."""
+    root, season = tree
+    plan = make_plan(season, rename_season_dir=True)
+    result = execute.execute_plan(plan, [root], undo_dir)
+    assert result.refused == []
+    assert result.ok
+
+    dest = season.parent / "Season 01"
+    assert not season.exists()
+    assert sorted(p.name for p in dest.iterdir()) == [
+        "Nagatan and Aoto (2026) - S01E0{} - {}.mp4".format(i + 1, tc)
+        for i, tc in enumerate(TIMECODES)
+    ] + ["poster.jpg"]
+    assert result.season_dir == str(dest)
+
+    # Every file rename stayed inside one directory.
+    for op in result.ops:
+        if op.op == execute.OP_MOVE:
+            assert Path(op.src).parent == Path(op.dst).parent
+
+
+def test_the_season_rename_reaches_the_same_names_as_the_move_path(tree, undo_dir,
+                                                                   tmp_path):
+    """Two routes, one destination. If these ever diverge, the checkbox has
+    become a naming choice rather than a transfer-cost choice."""
+    root, season = tree
+    moved = sorted(pf.target.name for pf in make_plan(season).files)
+    renamed = sorted(pf.target.name
+                     for pf in make_plan(season, rename_season_dir=True).files)
+    assert moved == renamed
+
+
+def test_the_leftover_travels_with_the_renamed_folder(tree, undo_dir):
+    """The one visible difference from the move path, and the reason the page
+    states it in both states: the poster is not renamed, but it does move."""
+    root, season = tree
+    execute.execute_plan(make_plan(season, rename_season_dir=True), [root], undo_dir)
+    assert (season.parent / "Season 01" / "poster.jpg").is_file()
+
+
+def test_the_season_rename_is_refused_onto_an_existing_folder(tree, undo_dir):
+    """os.rename onto an empty directory succeeds on POSIX, so this has to be a
+    refusal rather than something the filesystem stops for us."""
+    root, season = tree
+    (season.parent / "Season 01").mkdir()
+    before = snapshot(root)
+    result = execute.execute_plan(
+        make_plan(season, rename_season_dir=True), [root], undo_dir)
+    assert any("Season 01" in r for r in result.refused)
+    assert snapshot(root) == before
+
+
+def test_undo_puts_the_renamed_season_folder_back(tree, undo_dir):
+    root, season = tree
+    before = snapshot(root)
+    result = execute.execute_plan(
+        make_plan(season, rename_season_dir=True), [root], undo_dir)
+    assert result.ok
+    undone = execute.undo(result.manifest, undo_dir, [root])
+    assert undone.ok
+    assert snapshot(root) == before
+
+
+def test_the_season_rename_happens_after_the_files_and_before_the_show(tree, undo_dir):
+    """Containers after their contents, inner before outer — the ordering undo
+    depends on, since it walks the log backwards."""
+    root, season = tree
+    plan = make_plan(season, rename_season_dir=True, rename_show_dir=True)
+    ops = [op.op for op in execute.plan_operations(plan)]
+    assert execute.OP_MKDIR not in ops      # nothing is created
+    assert execute.OP_RMDIR not in ops      # and nothing is emptied
+    assert ops.index(execute.OP_MOVE) < ops.index(execute.OP_MOVE_SEASON_DIR)
+    assert ops.index(execute.OP_MOVE_SEASON_DIR) < ops.index(execute.OP_MOVE_DIR)
+
+
+def test_undo_reverses_both_folder_renames(tree, undo_dir):
+    root, season = tree
+    before = snapshot(root)
+    result = execute.execute_plan(
+        make_plan(season, rename_season_dir=True, rename_show_dir=True),
+        [root], undo_dir)
+    assert result.ok
+    assert execute.undo(result.manifest, undo_dir, [root]).ok
+    assert snapshot(root) == before
+
+
 def test_a_real_season_folder_is_never_removed(tmp_path, undo_dir):
     """Only the year-fallback form is cleaned up. An emptied 'Season 1' stays:
     removing a folder the user did not ask about is the greater surprise."""

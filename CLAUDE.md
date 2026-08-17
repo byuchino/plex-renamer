@@ -116,10 +116,10 @@ Facts worth not rediscovering:
 - **`Failed to attach … to compat systemd cgroup` in the journal is environmental**, not
   this unit: `transcode-dashboard` logs it 10 times too (cgroup v1/v2 hybrid on this
   Ubuntu 20.04 host). Ignore it.
-- **`~/plex-renamer-preview/` is dead** — the old hand-started Phase 2/3 preview. Stopped,
-  not running, superseded by the unit. It still holds 4 spent (already undone) test
-  manifests in its own `undo/`. Safe to delete; kept only to avoid a deletion nobody asked
-  for.
+- **`~/plex-renamer-preview/` is gone** (deleted 2026-08-17). It was the hand-started
+  Phase 2/3 preview, superseded by the unit. If a note elsewhere still refers to it, that
+  note is stale — there is one install now, `/opt/plex-renamer` under systemd, and one
+  state dir, `/var/lib/plex-renamer/undo`.
 - **Own venv, not `/opt/transcode/venv`.** The point is blast radius: a library-curation
   bug must not be able to break unattended transcoding.
 

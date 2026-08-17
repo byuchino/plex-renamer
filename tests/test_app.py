@@ -348,3 +348,45 @@ def test_an_episodic_folder_opens_as_a_no_op(mixed_client, mixed_library):
     assert data["move_count"] == 0
     assert data["ok"] is True
     assert data["season_dir_target"] == str(season)
+
+
+# ── Folder browser (Phase 2.5 UI) ──────────────────────────────────────────
+
+def test_browse_returns_clickable_crumbs_stopping_at_the_root(client, library):
+    root, season = library
+    data = client.get("/api/browse", query_string={"path": str(season)}).get_json()
+    assert [c["name"] for c in data["crumbs"]] == [
+        "TV Shows", "Nagatan and Aoto (2026) {tvdb-428763}", "Season 2026"]
+    assert data["crumbs"][0]["path"] == str(root)
+
+
+def test_small_listings_report_renameable_counts_per_folder(client, library):
+    """Counting is per child directory, so it is the season folders under a
+    show that carry a useful number — a show folder itself holds no files."""
+    _, season = library
+    data = client.get("/api/browse",
+                      query_string={"path": str(season.parent)}).get_json()
+    assert data["dirs"] == [
+        {"name": "Season 2026", "path": str(season), "renameable": len(TIMECODES)}]
+
+
+def test_large_listings_skip_the_per_folder_count(client, tmp_path):
+    """One listing per child is fine for a few seasons and wrong for a root
+    holding hundreds of shows across a tunnel."""
+    root = (tmp_path / "Big").resolve()
+    for i in range(app_module.CHILD_COUNT_LIMIT + 1):
+        (root / "Show {:03d}".format(i)).mkdir(parents=True)
+    c = create_app(Config(roots=[root])).test_client()
+    data = c.get("/api/browse", query_string={"path": str(root)}).get_json()
+    assert len(data["dirs"]) == app_module.CHILD_COUNT_LIMIT + 1
+    assert "renameable" not in data["dirs"][0]
+
+
+@pytest.mark.parametrize("noise", ["@eaDir", "#recycle", ".hidden"])
+def test_synology_and_hidden_folders_are_not_listed(tmp_path, noise):
+    root = (tmp_path / "Lib").resolve()
+    (root / noise).mkdir(parents=True)
+    (root / "Real Show").mkdir()
+    c = create_app(Config(roots=[root])).test_client()
+    data = c.get("/api/browse", query_string={"path": str(root)}).get_json()
+    assert [d["name"] for d in data["dirs"]] == ["Real Show"]

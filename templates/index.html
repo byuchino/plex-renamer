@@ -24,14 +24,40 @@
   code, .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
 
   /* Browser */
-  .crumbs { padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; word-break: break-all; }
-  .dirlist { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
-  .dir {
-    background: #11131a; border: 1px solid var(--border); color: var(--text);
-    padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  .crumbs { padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .crumb {
+    background: none; border: none; color: var(--accent); cursor: pointer;
+    font-size: 13px; padding: 2px 4px; border-radius: 4px; font-family: inherit;
   }
-  .dir:hover { border-color: var(--accent); }
-  .dir .count { color: var(--muted); font-size: 11px; margin-left: 6px; }
+  .crumb:hover { background: rgba(59,130,246,.12); }
+  .crumb.current { color: var(--text); cursor: default; font-weight: 600; }
+  .crumb.current:hover { background: none; }
+  .crumbs .sep { color: var(--muted); margin: 0 2px; }
+  .toolbar { padding: 8px 14px; border-bottom: 1px solid var(--border); }
+  .search-input {
+    width: 100%; background: #11131a; border: 1px solid var(--border); color: var(--text);
+    padding: 6px 10px; border-radius: 6px; font-size: 13px; font-family: inherit;
+  }
+  .search-input:focus { outline: 1px solid var(--accent); }
+  /* One folder per row, alphabetical, scrollable — 202 shows in a wrapped pile
+     of pills is unscannable. */
+  .dirlist { max-height: 340px; overflow-y: auto; }
+  .dir {
+    display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    width: 100%; text-align: left; background: none; border: none;
+    border-bottom: 1px solid var(--border); color: var(--text);
+    padding: 7px 14px; cursor: pointer; font-size: 13px; font-family: inherit;
+  }
+  .dir:last-child { border-bottom: none; }
+  .dir:hover { background: rgba(59,130,246,.10); }
+  .dir .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dir .meta { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+  /* A plain chevron rather than a folder emoji: emoji depend on a font that
+     is not always present, and render as an empty box when it is not. */
+  .dir .chev { color: var(--muted); opacity: .6; }
+  .dir:hover .chev { color: var(--accent); opacity: 1; }
+  .dir .count { color: var(--ok); font-size: 11px; }
+  .dir-count { padding: 8px 14px; color: var(--muted); font-size: 11px; }
 
   /* Form */
   .form { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; padding: 12px 14px; }
@@ -121,7 +147,12 @@
 <section>
   <h2>Folder</h2>
   <div class="crumbs" id="crumbs">Loading…</div>
+  <div class="toolbar" id="filter-bar" style="display:none">
+    <input type="text" class="search-input" id="dir-filter" autocomplete="off"
+           placeholder="Filter folders…">
+  </div>
   <div class="dirlist" id="dirlist"></div>
+  <div class="dir-count" id="dir-count"></div>
 </section>
 
 <div id="planner" style="display:none">
@@ -212,6 +243,7 @@
 <script>
 const state = {
   path: null,
+  dirs: [],           // subfolders of the current directory, as listed
   files: [],          // source_name order, as last returned by the server
   anchors: {},        // source_name -> episode number
   overrides: {},      // source_name -> hand-typed target name
@@ -248,27 +280,30 @@ async function browse(path) {
   const data = await res.json();
   if (data.error) { document.getElementById("crumbs").textContent = data.error; return; }
 
-  const crumbs = document.getElementById("crumbs");
-  crumbs.textContent = data.at_top ? "Configured roots" : data.path;
-
-  const list = document.getElementById("dirlist");
-  let html = "";
-  if (!data.at_top) {
-    // Always offered, including at a root: without it there is no way back to
-    // the root list to pick the other library.
-    html += '<button class="dir" data-path="">⌂ roots</button>';
-  }
-  if (data.parent) {
-    html += '<button class="dir" data-path="' + esc(data.parent) + '">↑ up</button>';
-  }
-  data.dirs.forEach(function (d) {
-    html += '<button class="dir" data-path="' + esc(d.path) + '">' + esc(d.name) + "</button>";
+  // Breadcrumb, every ancestor clickable back to the root list — which is
+  // also how you get back out of a root to reach the other library.
+  let crumbHtml = '<button class="crumb' + (data.at_top ? " current" : "") +
+                  '" data-path="">roots</button>';
+  (data.crumbs || []).forEach(function (c, i) {
+    const last = i === (data.crumbs.length - 1);
+    crumbHtml += '<span class="sep">›</span>';
+    crumbHtml += last
+      ? '<span class="crumb current">' + esc(c.name) + "</span>"
+      : '<button class="crumb" data-path="' + esc(c.path) + '">' + esc(c.name) + "</button>";
   });
-  if (!data.dirs.length && !data.parent) html = '<span class="note">No roots configured.</span>';
-  list.innerHTML = html;
-  list.querySelectorAll(".dir").forEach(function (b) {
+  const crumbs = document.getElementById("crumbs");
+  crumbs.innerHTML = crumbHtml;
+  crumbs.querySelectorAll("button.crumb").forEach(function (b) {
     b.onclick = function () { open(b.dataset.path || null); };
   });
+
+  state.dirs = data.dirs;
+  document.getElementById("dir-filter").value = "";
+  // The filter earns its place on a 202-show root and only gets in the way on
+  // a show folder with two seasons.
+  document.getElementById("filter-bar").style.display =
+    data.dirs.length > 8 ? "" : "none";
+  renderDirs();
 
   // A folder holding timecode files is one worth planning; otherwise this is
   // just a level to navigate through.
@@ -281,6 +316,41 @@ async function browse(path) {
   } else {
     state.path = null;
     document.getElementById("planner").style.display = "none";
+  }
+}
+
+function renderDirs() {
+  const q = document.getElementById("dir-filter").value.trim().toLowerCase();
+  const all = state.dirs || [];
+  const shown = q ? all.filter(function (d) {
+    return d.name.toLowerCase().indexOf(q) !== -1;
+  }) : all;
+
+  document.getElementById("dirlist").innerHTML = shown.map(function (d) {
+    // renameable is absent on big listings, where counting every child would
+    // mean one directory listing per row. A zero shows nothing rather than a
+    // dash: a show folder holds its files one level down, and marking it empty
+    // would be a lie.
+    const n = d.renameable;
+    const count = n ? '<span class="count">' + n + " file" +
+                      (n === 1 ? "" : "s") + "</span>" : "";
+    return '<button class="dir" data-path="' + esc(d.path) + '">' +
+           '<span class="name">' + esc(d.name) + "</span>" +
+           '<span class="meta">' + count + '<span class="chev">&rsaquo;</span></span>' +
+           "</button>";
+  }).join("");
+
+  document.getElementById("dirlist").querySelectorAll(".dir").forEach(function (b) {
+    b.onclick = function () { open(b.dataset.path || null); };
+  });
+
+  const count = document.getElementById("dir-count");
+  if (!all.length) {
+    count.textContent = "No subfolders.";
+  } else if (shown.length === all.length) {
+    count.textContent = all.length + " folder" + (all.length === 1 ? "" : "s");
+  } else {
+    count.textContent = shown.length + " of " + all.length + " folders";
   }
 }
 
@@ -462,6 +532,7 @@ function setEpisode(n) {
 });
 document.querySelectorAll('input[name=idsrc]').forEach(function (r) { r.onchange = replan; });
 document.getElementById("f-renamedir").onchange = replan;
+document.getElementById("dir-filter").oninput = renderDirs;
 document.getElementById("reset-btn").onclick = function () {
   state.anchors = {};
   state.overrides = {};

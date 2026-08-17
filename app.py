@@ -22,7 +22,9 @@ import core
 from config import Config, OutsideRoots, load_config, resolve_within_roots
 
 # Directories that are never useful to browse into and only add noise.
-HIDDEN_DIR_PREFIXES = (".", "@")
+# '@eaDir' and '#recycle' are both Synology's, and both show up in these
+# libraries alongside the real folders.
+HIDDEN_DIR_PREFIXES = (".", "@", "#")
 
 
 def _error(message: str, code: int = 400):
@@ -48,6 +50,32 @@ def _resolve(cfg: Config, raw: Optional[str]) -> Path:
     if not raw:
         raise OutsideRoots("no path given")
     return resolve_within_roots(raw, cfg.roots)
+
+
+# Counting renameable files means one extra listing per child directory. That
+# is fine for a show folder holding a handful of seasons and wrong for a root
+# holding 202 shows, especially with one library across a WireGuard tunnel.
+CHILD_COUNT_LIMIT = 40
+
+
+def _crumbs(cfg: Config, path: Path) -> List[Dict[str, str]]:
+    """The path split into clickable ancestors, from its root downward.
+
+    Navigation is confined to roots, so the trail stops at whichever root
+    contains the path rather than walking up to '/'.
+    """
+    for root in cfg.roots:
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            continue
+        out = [{"name": root.name or str(root), "path": str(root)}]
+        cur = root
+        for part in rel.parts:
+            cur = cur / part
+            out.append({"name": part, "path": str(cur)})
+        return out
+    return []
 
 
 def _parent_within_roots(cfg: Config, path: Path) -> Optional[str]:
@@ -186,6 +214,7 @@ def create_app(config: Optional[Config] = None) -> Flask:
                 "path": None,
                 "parent": None,
                 "at_top": True,
+                "crumbs": [],
                 "dirs": [{"name": str(r), "path": str(r)} for r in cfg.roots],
                 "renameable": 0,
                 "skipped": 0,
@@ -199,15 +228,21 @@ def create_app(config: Optional[Config] = None) -> Flask:
 
         entries = _dir_entries(path)
         renameable, skipped = core.collect_files(entries)
+        children = [p for p in entries
+                    if p.is_dir() and not p.name.startswith(HIDDEN_DIR_PREFIXES)]
+        dirs = [{"name": p.name, "path": str(p)} for p in children]
+        if len(children) <= CHILD_COUNT_LIMIT:
+            # Small enough to be worth telling the user which subfolder holds
+            # something renameable, so season folders can be picked at a glance.
+            for entry, child in zip(dirs, children):
+                found, _ = core.collect_files(_dir_entries(child))
+                entry["renameable"] = len(found)
         return jsonify({
             "path": str(path),
             "parent": _parent_within_roots(cfg, path),
             "at_top": False,
-            "dirs": [
-                {"name": p.name, "path": str(p)}
-                for p in entries
-                if p.is_dir() and not p.name.startswith(HIDDEN_DIR_PREFIXES)
-            ],
+            "crumbs": _crumbs(cfg, path),
+            "dirs": dirs,
             # Lets the browser show which folder is worth opening without a
             # second request per directory.
             "renameable": len(renameable),

@@ -153,9 +153,15 @@ the page.
 (episode matrix is 1–40 with direct typing), authentication, multi-directory batch
 runs. Plex rescan after renaming is a manual step.
 
-**Known risk, not yet tested:** Plex treats a renamed file as delete + add, so watched
-state and manual metadata edits on those episodes may not survive. Test on a single
-file before any bulk run.
+**Watched state on rename: accepted as lost, not tested.** Plex treats a renamed file as
+delete + add, so watched state and manual metadata edits on those episodes may not
+survive. Deliberately not investigated, because of what the tool is for: the primary case
+is **freshly transcoded recordings in the timecode fallback layout** — files that have
+never been watched, and carry no hand-made metadata, because nobody can play them under a
+name Plex could not match in the first place. Spending the effort to preserve state that
+does not exist yet would be paying for the wrong case. Renaming an old, already-watched
+episode is possible and will probably cost its watched flag; that is a known price, not a
+surprise.
 
 ## Design
 
@@ -219,8 +225,8 @@ the page reachable in one step from a headless browser.
 2. ✅ **Web UI, read-only.** Full page driving `/api/plan`. Can be pointed at the real
    library and is incapable of changing it.
 3. ✅ **Execute.** `execute.py`, undo manifest, confirmation dialog, plan hash.
-4. **Deploy and prove.** First real run against a scratch copy of one season, then the
-   single-file watched-state test, then real use.
+4. ✅ **Deploy and prove.** systemd unit on the VM, own venv, proven on scratch copies of
+   real seasons in both roots. The watched-state test was dropped by decision, see above.
 
 ## Environment
 
@@ -256,13 +262,20 @@ python is 3.12, so this will not be caught locally — verify against the VM's i
 PLEX_RENAMER_CONFIG=/path/to/config.ini .venv/bin/python app.py
 ```
 
+On the VM it runs as `plex-renamer.service` from `/opt/plex-renamer` with its own venv,
+reading `/etc/plex-renamer/config.ini`. Logs go to journald
+(`journalctl -u plex-renamer -f`); `deploy/plex-renamer.service` is the unit as installed.
+The unit needs `SupplementaryGroups=users` to write the KIKU tree, and deliberately stops
+short of `ProtectSystem=strict` — that would require every configured root as a
+`ReadWritePaths` entry and would break the moment a root is added to the config.
+
 Flask is started without debug, so **Jinja does not reload a changed template** —
 restart the process after editing `templates/index.html` or you will screenshot the
 previous version and go looking for a bug that is not there.
 
 ## Status
 
-**Phases 1 through 3 complete. Nothing deployed — and the code can now move a file.**
+**Phases 1 through 4 complete. Installed and running as a service; it can move files.**
 
 The page browses the configured roots, derives all four inputs from the path (or from
 the files, see above), live re-plans on every edit, groups re-broadcasts via
@@ -292,5 +305,6 @@ alone, and adding the missing `(2008)` to the folder raises the churn from 125 r
 141 rather than settling it. That one is a duplicate-media decision, not a naming bug.
 Neither is new behaviour, and neither is caught by the 60-folder sweep.
 
-Phase 4 is next: deploy, then the first real run against a scratch copy of one season,
-then the single-file watched-state test.
+Phase 5 is next: destination show folders, for merging the duplicate show folders that
+exist in the library — confined to the same root *and* the same `st_dev`, since the two
+roots are separate NFS exports and `os.rename` between them fails with `EXDEV`.

@@ -1,0 +1,44 @@
+[Unit]
+Description=Plex Renamer
+Documentation=https://github.com/byuchino/plex-renamer
+# The media lives on NFS mounts, so starting before they are there means the
+# roots resolve to empty directories and every browse looks like an empty
+# library.
+After=network-online.target remote-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PLEX_RENAMER_CONFIG=/etc/plex-renamer/config.ini
+# Unbuffered, so log lines reach journald as they happen rather than when the
+# buffer flushes — the whole point of the logging is watching a run.
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/plex-renamer/venv/bin/python /opt/plex-renamer/app.py
+WorkingDirectory=/opt/plex-renamer
+Restart=on-failure
+RestartSec=10
+
+User=brian
+Group=brian
+# Required to write the KIKU tree: it is mode 775 owned by a DSM uid this host
+# does not have, with group 100 (users). Without this the tool can browse that
+# library and refuse every rename in it.
+SupplementaryGroups=users
+
+# Own its own venv rather than sharing /opt/transcode's: a library-curation bug
+# must not be able to break unattended transcoding.
+StateDirectory=plex-renamer
+ReadWritePaths=/var/lib/plex-renamer
+
+# Modest hardening only. ProtectSystem=strict or PrivateMounts would need every
+# NFS root listed as ReadWritePaths and breaks as soon as a root is added to the
+# config, which is a footgun for a tool whose whole job is writing to them.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

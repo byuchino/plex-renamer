@@ -8,8 +8,9 @@ the operational facts that are not derivable from the code.
 
 ## Status
 
-Phases 1 through 3 are complete: **the code can move real files.** Nothing is deployed as
-a service yet, and the running preview on the VM is still Phase 2 code (see below).
+Phases 1 through 4 are complete: **installed as `plex-renamer.service` on the VM and able
+to move real files.** Phase 5 (destination show folders, for merging duplicate show
+folders) is next.
 
 `test_no_module_can_mutate_the_filesystem` in `tests/test_app.py` pins `app.py`,
 `core.py` and `config.py` as non-mutating. `execute.py` is the single exception and is
@@ -76,7 +77,7 @@ One pre-existing naming misfire is **fixed**; one remains. Neither was caught by
 
 | | |
 |---|---|
-| Tests | `.venv/bin/python -m pytest tests -q` (205 passing) |
+| Tests | `.venv/bin/python -m pytest tests -q` (207 passing) |
 | Push | `GIT_SSH_COMMAND='ssh -F ~/.ssh/config' git push` — remote uses the **`github-byuchino`** alias; `byuchino` is not this machine's default GitHub account |
 | VM | `ssh handbrake-vm` (`brian@192.168.254.206`), **Python 3.8.10** |
 | Roots | `/mnt/bama/volume1/TV Shows`, `/mnt/bama/volume1/Videos/KIKU` — both on the home NAS |
@@ -86,28 +87,51 @@ runtime annotations. Syntax-check before deploying:
 
     cat app.py | ssh handbrake-vm 'python3 -c "import sys; compile(sys.stdin.read(),\"x\",\"exec\")"'
 
-## The running preview
+## The install (Phase 4, done 2026-08-17)
 
-A preview runs on the VM from `~/plex-renamer-preview/` on port 8101. Since 2026-08-17 it
-carries **Phase 3 code, so its Rename button is live against the real library** — the user
-asked for that deliberately, ahead of the scratch-copy proof. It is still **not** the
-Phase 4 install: hand-started, no systemd, dies on reboot. `execute.py` must be copied
-alongside `app.py` or the import fails. Its `undo_dir` is
-`/home/brian/plex-renamer-preview/undo` (created on the first real run), not the
-`/var/lib` default — an unwritable `undo_dir` refuses every execute, which is safe but
-looks like a bug.
+| | |
+|---|---|
+| Unit | `plex-renamer.service`, enabled, `User=brian` + `SupplementaryGroups=users` |
+| Code | `/opt/plex-renamer/` with its **own** venv (`venv/bin/python`, flask 3.0.3, py3.8.10) |
+| Config | `/etc/plex-renamer/config.ini` (root-owned, 644) |
+| State | `/var/lib/plex-renamer/undo/` — manifests: undo records *and* history |
+| Logs | journald: `journalctl -u plex-renamer -f` |
+| Unit source | `deploy/plex-renamer.service` in this repo |
 
-**Restarting it needs `setsid` and separate steps.** `kill` + start in one compound ssh
-command gets blocked, and the start command holds the ssh channel open even with `nohup`
-— the server is already up and detached, so just stop waiting on that shell and verify
-with `ss` from a second connection. To redeploy:
+Redeploy after a change:
 
-    scp -q app.py core.py config.py execute.py handbrake-vm:~/plex-renamer-preview/
-    scp -q templates/index.html handbrake-vm:~/plex-renamer-preview/templates/
-    ssh handbrake-vm 'PID=$(ss -lptnH "sport = :8101" | grep -o "pid=[0-9]*" | head -1 | cut -d= -f2)
-      [ -n "$PID" ] && kill "$PID"; sleep 2
-      cd ~/plex-renamer-preview && PLEX_RENAMER_CONFIG=$PWD/config.ini \
-        setsid nohup /opt/transcode/venv/bin/python app.py > preview.log 2>&1 < /dev/null &'
+    scp -q app.py core.py config.py execute.py cli.py handbrake-vm:/opt/plex-renamer/
+    scp -q templates/index.html handbrake-vm:/opt/plex-renamer/templates/
+    ssh handbrake-vm 'sudo systemctl restart plex-renamer'
+
+Facts worth not rediscovering:
+
+- **`SupplementaryGroups=users` is load-bearing.** Without gid 100 the service browses the
+  KIKU library and refuses every rename in it. See the group note below.
+- **Hardening stops at `ProtectSystem=full` on purpose.** `strict`, or `PrivateMounts`,
+  needs every configured root listed as `ReadWritePaths` — a footgun for a tool whose job
+  is writing to those roots, and it breaks silently when a root is added. Verified that
+  `full` does *not* block the NFS writes, by executing and undoing a real run through the
+  service.
+- **`Failed to attach … to compat systemd cgroup` in the journal is environmental**, not
+  this unit: `transcode-dashboard` logs it 10 times too (cgroup v1/v2 hybrid on this
+  Ubuntu 20.04 host). Ignore it.
+- **`~/plex-renamer-preview/` is dead** — the old hand-started Phase 2/3 preview. Stopped,
+  not running, superseded by the unit. It still holds 4 spent (already undone) test
+  manifests in its own `undo/`. Safe to delete; kept only to avoid a deletion nobody asked
+  for.
+- **Own venv, not `/opt/transcode/venv`.** The point is blast radius: a library-curation
+  bug must not be able to break unattended transcoding.
+
+## Watched state on rename: settled, will not be tested
+
+Plex treats a rename as delete + add, so watched state and manual metadata edits probably
+do not survive. **Accepted as lost (user decision, 2026-08-17)** — do not re-open it or
+build anything to preserve it. The reasoning is what matters: the tool's primary case is
+**freshly transcoded recordings in the timecode fallback layout**, which have never been
+watched and carry no hand-made metadata, because nobody can play a file under a name Plex
+could not match. There is no state there to preserve. Renaming an old already-watched
+episode will probably cost its watched flag; that is a known price.
 
 ## Things that cost real time to learn
 

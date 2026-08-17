@@ -275,9 +275,15 @@ the page reachable in one step from a headless browser.
 | Initial roots | `/mnt/bama/volume1/TV Shows`, `/mnt/bama/volume1/Videos/KIKU` |
 
 **Both roots are on the home nas.** The condo nas has its own copy of the KIKU library,
-but the two boxes sync it between themselves, so renaming the local copy is enough. That
-keeps this tool off the WireGuard tunnel entirely — unlike the transcode pipeline, it has
-no remote-mount failure mode.
+but the two boxes sync it between themselves, so renaming the local copy is enough. The
+tool itself never touches the WireGuard tunnel — unlike the transcode pipeline, it has no
+remote-mount failure mode.
+
+**Its output does, though.** A move into a different season folder — the tool's primary
+operation — is not propagated as a move: the remote deletes the old folder and re-uploads
+every file. Measured on the first real run, 4.6 GB across the tunnel to renumber ten
+recordings. A rename *within* one directory does propagate as a true rename. Neither is a
+correctness problem; it is a bandwidth cost to budget for before a bulk run.
 
 They are still **separate NFS exports** (`TV Shows` and `Videos` are exported
 independently, `st_dev` 40 and 41), so `os.rename` between the two roots fails with

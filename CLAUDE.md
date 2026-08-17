@@ -211,10 +211,31 @@ episode will probably cost its watched flag; that is a known price.
   with `sudo usermod -aG users brian`; the tree is mode 775 owned by a DSM uid the VM does
   not have. A process must be restarted to pick the group up. This lives on the VM, not in
   git — **a rebuilt VM needs it again**. Undo: `sudo gpasswd -d brian users`.
-- **Renaming is safe with respect to the NAS sync.** The two NAS boxes sync these
-  directories, and a rename propagates as a true rename (verified: inode preserved on the
-  receiving side, nothing in the recycle bin), so a bulk rename does not re-transfer the
-  files. Sync is two-way. It does **not** propagate POSIX permissions.
+- **The NAS sync re-transfers a season-folder move. Corrected 2026-08-17 — the earlier
+  "renaming is safe with respect to the sync" note was true only of the narrow case it
+  was tested on.** What is now known:
+  - A rename **within one directory** propagates as a true rename (verified: inode
+    preserved on the receiving side, nothing in the recycle bin). This is the case the
+    original note measured.
+  - A move **into a different season folder** does not. Observed on the real
+    `Nagatan and Aoto` run: the remote deleted `Season 2026` and re-uploaded all ten
+    files from `Season 01` — **4.6 GB over the WireGuard tunnel for a rename.** The sync
+    does not correlate a file appearing in a new directory with one vanishing from
+    another, and the emptied-`Season YYYY` cleanup removes the source out from under it.
+
+  This matters because the cross-directory move is the tool's **primary** operation: the
+  whole point of the timecode/`Season YYYY` fallback case is moving files into a real
+  season folder. Budget the transfer before a bulk run on a large folder, and prefer
+  doing them when the tunnel is not otherwise busy.
+
+  Untested mitigation, if the cost ever justifies it: when every file in a `Season YYYY`
+  folder lands in one season, **rename the folder** instead of moving the files, and see
+  whether the sync treats a directory rename natively. README rejected folder-renaming
+  outright so that one year folder can be split across seasons — this would have to be a
+  narrow special case, not a change to the general rule. Nobody has measured whether the
+  sync handles a directory rename any better than a file move, so measure first.
+
+  Sync is two-way. It does **not** propagate POSIX permissions.
 - **Do not restart the transcode services** (`transcode-watcher`) casually — it kills any
   in-progress local encode. That project is a separate repo at `/home/brian/handbrake`;
   this tool never touches its `jobs.db`.

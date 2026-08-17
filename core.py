@@ -42,16 +42,26 @@ RE_SEASON_DIR = re.compile(r"^Season\s+(?P<num>\d+)\s*$", re.IGNORECASE)
 RE_SPECIALS_DIR = re.compile(r"^Specials\s*$", re.IGNORECASE)
 SPECIALS_DIR_NAME = "Specials"
 
-# An already-episodic filename: "<head> - S01E04 - <tail>".
+# An already-episodic filename: "<head> - S01E04 - <tail>", or a multi-episode
+# one, "<head> - S01E01-E02 - <tail>".
 #
 # The head is non-greedy so the FIRST episode marker wins, and the tail is
 # taken as everything after it rather than by splitting on ' - ' — real tails
 # contain their own dashes ("[Kioku] 1 Litre of Tears - 01"), and splitting
 # would truncate them. A file with no tail at all ("Show - S01E04.mkv") is
 # still episodic.
+#
+# Only the hyphenated '-E02' spelling of a span is recognised. Plex also reads
+# 'S01E01E02' and 'S01E01-02', but neither is a form this library actually
+# uses: of 9600 files, 58 carry '-E', none carry the bare 'E01E02', and the
+# four '-02' ones are all in Star Wars The Clone Wars — the known duplicate-
+# media folder. Recognising a spelling means re-rendering it in the canonical
+# one, which is a rename of a file nobody asked about, so the other two forms
+# stay in the tail and keep round-tripping byte for byte.
 RE_EPISODIC = re.compile(
     r"^(?P<head>.+?)"
     r"\s+-\s+S(?P<season>\d{1,4})E(?P<episode>\d{1,4})"
+    r"(?P<span>-E(?P<episode_end>\d{1,4}))?"
     r"(?P<rest>.*)$",
     re.IGNORECASE,
 )
@@ -180,10 +190,20 @@ class SourceFile:
     tail_raw: str
     season: Optional[int] = None
     episode: Optional[int] = None
+    # Last episode in the file, for a multi-episode recording. None means the
+    # file holds one episode.
+    episode_end: Optional[int] = None
 
     @property
     def name(self) -> str:
         return self.path.name
+
+    @property
+    def span(self) -> int:
+        """How many episodes this file holds. Always at least 1."""
+        if self.episode is None or self.episode_end is None:
+            return 1
+        return max(1, self.episode_end - self.episode + 1)
 
     @property
     def tail(self) -> str:
@@ -198,12 +218,22 @@ def classify(path: Path) -> Optional[SourceFile]:
     """
     m = RE_EPISODIC.match(path.stem)
     if m:
+        episode = int(m.group("episode"))
+        rest = m.group("rest") or ""
+        end = int(m.group("episode_end")) if m.group("episode_end") else None
+        if end is not None and end <= episode:
+            # 'S01E05-E02' is not a span, it is a name we do not understand.
+            # Hand the text back to the tail so it is reproduced verbatim
+            # rather than silently "corrected" into something else.
+            rest = m.group("span") + rest
+            end = None
         return SourceFile(
             path=path,
             kind=EPISODIC,
-            tail_raw=m.group("rest") or "",
+            tail_raw=rest,
             season=int(m.group("season")),
-            episode=int(m.group("episode")),
+            episode=episode,
+            episode_end=end,
         )
     tc = timecode_of(path)
     if tc is not None:
@@ -255,6 +285,17 @@ class PlannedFile:
     target: Path
     kind: str = TIMECODE
     issues: List[str] = field(default_factory=list)
+    # Inclusive last episode. Equal to `episode` for a single-episode file, so
+    # everything downstream can treat a row as a range without special-casing.
+    episode_end: Optional[int] = None
+
+    def __post_init__(self):
+        if self.episode_end is None:
+            self.episode_end = self.episode
+
+    @property
+    def episodes(self) -> range:
+        return range(self.episode, self.episode_end + 1)
 
     @property
     def target_name(self) -> str:
@@ -297,12 +338,18 @@ class Plan:
 
 
 def build_target_name(show_name: str, year: Optional[str], season: int,
-                      episode: int, tail_raw: str, suffix: str) -> str:
+                      episode: int, tail_raw: str, suffix: str,
+                      episode_end: Optional[int] = None) -> str:
     """'Nagatan and Aoto (2026) - S01E02 - 2026-06-23 17 00 00.mp4'.
 
     The year is part of the convention the transcode pipeline already writes,
     so files renamed here sit consistently alongside ones it produced. It is
     omitted entirely — rather than rendered as '()' — when unknown.
+
+    A file holding two consecutive episodes renders as 'S01E01-E02', which is
+    how Plex reads a multi-episode file. A span of one renders plain: never
+    'S01E01-E01', which Plex would accept but which would rename every ordinary
+    file in the library.
 
     `tail_raw` carries its own separator and is appended verbatim, making this
     the exact inverse of RE_EPISODIC — which is what lets an already-correct
@@ -311,7 +358,10 @@ def build_target_name(show_name: str, year: Optional[str], season: int,
     """
     show = show_name.strip()
     head = "{} ({})".format(show, year) if year else show
-    return "{} - S{}E{}{}{}".format(head, pad(season), pad(episode), tail_raw, suffix)
+    marker = "S{}E{}".format(pad(season), pad(episode))
+    if episode_end is not None and episode_end > episode:
+        marker += "-E{}".format(pad(episode_end))
+    return "{} - {}{}{}".format(head, marker, tail_raw, suffix)
 
 
 def season_dir_name(season: int) -> str:
@@ -336,8 +386,9 @@ def build_show_dir_name(show_name: str, year: Optional[str],
 
 
 def assign_episodes(files: Sequence[SourceFile], anchors: Dict[str, int],
-                    per_episode: int = 1) -> List[int]:
-    """Episode number per file, in order.
+                    per_episode: int = 1,
+                    episodes_per_file: int = 1) -> List[Tuple[int, int]]:
+    """The (first, last) episode each file covers, in order.
 
     Numbering starts at 1 and increments. An anchor (an explicit pick for one
     file) sets that file's number and everything after it continues from there
@@ -360,25 +411,44 @@ def assign_episodes(files: Sequence[SourceFile], anchors: Dict[str, int],
     folder work — four new recordings dropped beside an existing E01-E10 get
     E11 onward instead of restarting at E01. per_episode groups only the
     undated run, since numbered files already state their own episode.
+
+    episodes_per_file is the inverse control: how many consecutive episodes one
+    recording holds, for a broadcast that airs a double episode as a single
+    programme. It widens each row into a span and advances the counter by the
+    span, so two double-episode recordings are E01-E02 and E03-E04 rather than
+    E01 and E02. The two controls compose — a double episode that is also
+    re-broadcast the next day is four files reading E01-E02, E01-E02, E03-E04,
+    E03-E04, and both shapes exist in this library.
+
+    A file that already carries its own span keeps it, and the counter advances
+    past the whole span. Without that, the file after an existing 'S01E01-E02'
+    would be numbered E02: the implicit anchor would be off by one for every
+    row below a double episode.
     """
     per_episode = max(1, per_episode)
-    out: List[int] = []
+    episodes_per_file = max(1, episodes_per_file)
+    out: List[Tuple[int, int]] = []
     current = 1
+    span = episodes_per_file
     used = 0
     for f in files:
         explicit = f.name in anchors
         if explicit:
             current = anchors[f.name]
+            span = episodes_per_file
             used = 0
         elif f.kind == EPISODIC and f.episode is not None:
             current = f.episode
+            span = f.span
             used = 0
-        out.append(current)
+        else:
+            span = episodes_per_file
+        out.append((current, current + span - 1))
         used += 1
         # A numbered file never shares its number with the next file by way of
         # grouping; only the undated run does that.
         if used >= per_episode or (f.kind == EPISODIC and not explicit):
-            current += 1
+            current += span
             used = 0
     return out
 
@@ -417,6 +487,7 @@ def build_plan(season_dir: Path,
                ident_source: str = DEFAULT_ID_SOURCE,
                anchors: Optional[Dict[str, int]] = None,
                per_episode: int = 1,
+               episodes_per_file: int = 1,
                rename_show_dir: bool = False,
                name_overrides: Optional[Dict[str, str]] = None) -> Plan:
     """The whole proposal, as data. Reads nothing from disk except the listing
@@ -459,9 +530,11 @@ def build_plan(season_dir: Path,
     overrides = name_overrides or {}
     dest_dir = plan.season_dir_target
     mismatched_seasons = set()
-    for f, episode in zip(files, assign_episodes(files, anchors or {}, per_episode)):
+    spans = assign_episodes(files, anchors or {}, per_episode, episodes_per_file)
+    for f, (episode, episode_end) in zip(files, spans):
         path = f.path
-        name = build_target_name(show_name, year, season, episode, f.tail_raw, path.suffix)
+        name = build_target_name(show_name, year, season, episode, f.tail_raw,
+                                 path.suffix, episode_end)
         override_issues: List[str] = []
         if path.name in overrides:
             typed = overrides[path.name]
@@ -471,7 +544,7 @@ def build_plan(season_dir: Path,
             if not override_issues:
                 name = typed.strip()
         pf = PlannedFile(source=path, episode=episode, target=dest_dir / name,
-                         kind=f.kind)
+                         kind=f.kind, episode_end=episode_end)
         pf.issues.extend(override_issues)
         if episode < 1:
             pf.issues.append("Episode must be 1 or greater.")
@@ -548,9 +621,14 @@ def _check_collisions(plan: Plan) -> None:
     # disk. Reported as a neutral note so the grouping is visible while
     # numbering a season, and deliberately not as an issue: blocking here
     # would reject the correct plan for an entire library.
+    #
+    # A multi-episode file counts against every episode it covers, so a partial
+    # overlap ('E01-E02' beside 'E02-E03') is as visible as an exact duplicate.
+    # Still a note: the timecodes differ, so nothing collides on disk.
     by_episode: Dict[int, List[PlannedFile]] = {}
     for pf in plan.files:
-        by_episode.setdefault(pf.episode, []).append(pf)
+        for ep in pf.episodes:
+            by_episode.setdefault(ep, []).append(pf)
     for episode in sorted(by_episode):
         group = by_episode[episode]
         if len(group) > 1:

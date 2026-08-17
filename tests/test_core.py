@@ -142,6 +142,12 @@ def test_build_show_dir_name(ident, source, expected):
 
 # ── Episode assignment and cascade ─────────────────────────────────────────
 
+def starts(spans):
+    """Just the first episode of each row. Most of these tests are about the
+    numbering sequence, not about multi-episode spans."""
+    return [a for a, _ in spans]
+
+
 def files(n):
     return [core.classify(Path("/s/Show (2026) - 2026-01-{:02d} 00 00 00.mp4".format(i + 1)))
             for i in range(n)]
@@ -153,18 +159,18 @@ def episodic(*numbers):
 
 
 def test_episodes_start_at_one_and_increment():
-    assert core.assign_episodes(files(4), {}) == [1, 2, 3, 4]
+    assert starts(core.assign_episodes(files(4), {})) == [1, 2, 3, 4]
 
 
 def test_anchor_cascades_forward_and_leaves_earlier_rows_alone():
     fs = files(5)
-    eps = core.assign_episodes(fs, {fs[2].name: 7})
+    eps = starts(core.assign_episodes(fs, {fs[2].name: 7}))
     assert eps == [1, 2, 7, 8, 9]
 
 
 def test_multiple_anchors_each_restart_the_run():
     fs = files(5)
-    eps = core.assign_episodes(fs, {fs[1].name: 5, fs[3].name: 20})
+    eps = starts(core.assign_episodes(fs, {fs[1].name: 5, fs[3].name: 20}))
     assert eps == [1, 5, 6, 20, 21]
 
 
@@ -228,19 +234,19 @@ def test_duplicate_episode_numbers_are_allowed_and_only_noted():
 
 def test_per_episode_pairs_each_episode_with_its_rebroadcast():
     """The regular Hawaii case: 16 recordings are 8 episodes aired twice."""
-    eps = core.assign_episodes(files(16), {}, per_episode=2)
+    eps = starts(core.assign_episodes(files(16), {}, per_episode=2))
     assert eps == [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8]
 
 
 def test_per_episode_of_one_is_unchanged_behaviour():
-    assert core.assign_episodes(files(4), {}, per_episode=1) == [1, 2, 3, 4]
+    assert starts(core.assign_episodes(files(4), {}, per_episode=1)) == [1, 2, 3, 4]
 
 
 def test_anchor_starts_a_fresh_group_when_a_rebroadcast_is_missing():
     """A week whose re-broadcast never aired: anchor at the break and the rest
     re-pairs correctly, instead of every later row needing a correction."""
     fs = files(6)
-    eps = core.assign_episodes(fs, {fs[3].name: 3}, per_episode=2)
+    eps = starts(core.assign_episodes(fs, {fs[3].name: 3}, per_episode=2))
     assert eps == [1, 1, 2, 3, 3, 4]
 
 
@@ -336,24 +342,24 @@ def test_overrides_are_collision_checked_like_derived_names():
 # ── Mixed folders and already-episodic files (Phase 2.5) ───────────────────
 
 def test_numbered_files_hold_their_own_numbers():
-    assert core.assign_episodes(episodic(1, 2, 3), {}) == [1, 2, 3]
+    assert starts(core.assign_episodes(episodic(1, 2, 3), {})) == [1, 2, 3]
 
 
 def test_numbered_files_keep_a_gap_rather_than_being_renumbered():
     """E01, E05, E06 stays that way — the names are the source of truth."""
-    assert core.assign_episodes(episodic(1, 5, 6), {}) == [1, 5, 6]
+    assert starts(core.assign_episodes(episodic(1, 5, 6), {})) == [1, 5, 6]
 
 
 def test_undated_recordings_continue_after_the_episodes_that_exist():
     """The mixed-folder rule: four new recordings beside E01-E03 become E04+,
     not a second E01."""
     mixed = episodic(1, 2, 3) + files(4)
-    assert core.assign_episodes(mixed, {}) == [1, 2, 3, 4, 5, 6, 7]
+    assert starts(core.assign_episodes(mixed, {})) == [1, 2, 3, 4, 5, 6, 7]
 
 
 def test_per_episode_groups_only_the_undated_run():
     mixed = episodic(1, 2) + files(4)
-    assert core.assign_episodes(mixed, {}, per_episode=2) == [1, 2, 3, 3, 4, 4]
+    assert starts(core.assign_episodes(mixed, {}, per_episode=2)) == [1, 2, 3, 3, 4, 4]
 
 
 def test_an_explicit_anchor_moves_one_numbered_file_and_no_others():
@@ -361,12 +367,127 @@ def test_an_explicit_anchor_moves_one_numbered_file_and_no_others():
     later numbered files, because those carry their own numbers — renumbering
     a whole run off one pick would silently destroy deliberate gaps."""
     fs = episodic(1, 2, 3)
-    assert core.assign_episodes(fs, {fs[1].name: 9}) == [1, 9, 3]
+    assert starts(core.assign_episodes(fs, {fs[1].name: 9})) == [1, 9, 3]
 
 
 def test_an_anchor_on_a_numbered_file_still_cascades_into_undated_ones():
     fs = episodic(1, 2) + files(2)
-    assert core.assign_episodes(fs, {fs[1].name: 9}) == [1, 9, 10, 11]
+    assert starts(core.assign_episodes(fs, {fs[1].name: 9})) == [1, 9, 10, 11]
+
+
+# ── Multi-episode files ────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("name,season,episode,end,tail", [
+    ("Show - S01E01-E02 - Title.mkv", 1, 1, 2, "Title"),
+    ("Midnight Diner (2014) - S03E01-E10 - JAPANESE 1080p BR H264 AAC.mp4", 3, 1, 10,
+     "JAPANESE 1080p BR H264 AAC"),
+    ("Bones - S04E01-E02.HDTV.XviD-LOL.avi", 4, 1, 2, ".HDTV.XviD-LOL"),
+    ("Show - S01E04 - Title.mkv", 1, 4, None, "Title"),
+])
+def test_classify_reads_a_span(name, season, episode, end, tail):
+    f = core.classify(Path("/s/" + name))
+    assert (f.season, f.episode, f.episode_end, f.tail) == (season, episode, end, tail)
+
+
+@pytest.mark.parametrize("name", [
+    # Not a span: no digits after the -E.
+    "Show - S01E01-Extra Scenes.mkv",
+    # A backwards span is a name we do not understand, not a range.
+    "Show - S01E05-E02 - Title.mkv",
+    # Spellings Plex accepts but this library does not use. Recognising them
+    # would mean re-rendering them as '-E', i.e. renaming files nobody asked
+    # about — the four that exist are all in the Clone Wars duplicate folder.
+    "Star Wars The Clone Wars - S02E09-10.avi",
+    "Show - S01E01E02 - Title.mkv",
+])
+def test_a_non_span_stays_in_the_tail_and_round_trips(name):
+    p = Path("/s/" + name)
+    f = core.classify(p)
+    assert f.episode_end is None
+    head, year, _, _ = core.parse_show_dir(name.split(" - S")[0])
+    assert core.build_target_name(head, year, f.season, f.episode, f.tail_raw,
+                                  p.suffix, f.episode_end) == name
+
+
+@pytest.mark.parametrize("name", [
+    "Show - S01E01-E02 - Title.mkv",
+    "Shinsengumi With You I Bloom (2024) - S01E03-E04 - 2024-08-27 20 00 00.mp4",
+    "NCIS - S05E18-E19.avi",
+])
+def test_an_already_correct_span_round_trips(name):
+    """58 files in the library already carry a span. None of them may move."""
+    p = Path("/s/" + name)
+    f = core.classify(p)
+    head, year, _, _ = core.parse_show_dir(name.split(" - S")[0])
+    assert core.build_target_name(head, year, f.season, f.episode, f.tail_raw,
+                                  p.suffix, f.episode_end) == name
+
+
+def test_a_span_of_one_renders_plain():
+    """Never 'S01E01-E01' — Plex reads it, but it would rename the library."""
+    assert core.build_target_name("S", None, 1, 4, " - t", ".mp4", 4) \
+        == "S - S01E04 - t.mp4"
+
+
+def test_episodes_per_file_widens_each_row():
+    assert core.assign_episodes(files(3), {}, episodes_per_file=2) \
+        == [(1, 2), (3, 4), (5, 6)]
+
+
+def test_episodes_per_file_composes_with_per_episode():
+    """A double episode that is also re-broadcast the next day. Both shapes
+    exist in this library (Shinsengumi With You I Bloom)."""
+    assert core.assign_episodes(files(4), {}, per_episode=2, episodes_per_file=2) \
+        == [(1, 2), (1, 2), (3, 4), (3, 4)]
+
+
+def test_the_nagatan_case_end_to_end():
+    fs = [SEASON_DIR / "Nagatan and Aoto (2026) - 2026-06-22 23 00 00.mp4"]
+    plan = core.build_plan(season_dir=SEASON_DIR, entries=fs,
+                           show_name="Nagatan and Aoto", year="2026", season=1,
+                           episodes_per_file=2)
+    assert plan.ok
+    assert plan.files[0].target.name == \
+        "Nagatan and Aoto (2026) - S01E01-E02 - 2026-06-22 23 00 00.mp4"
+
+
+def test_a_numbered_span_holds_and_the_run_continues_past_it():
+    """The off-by-one this fixes: before spans were parsed, the file after an
+    existing 'S01E01-E02' was numbered E02."""
+    fs = [core.classify(Path("/s/Show - S01E01-E02 - Title.mkv"))] + files(2)
+    assert core.assign_episodes(fs, {}) == [(1, 2), (3, 3), (4, 4)]
+
+
+def test_a_span_keeps_its_own_width_regardless_of_the_folder_input():
+    """A file states what it holds; the folder-wide input is for the ones that
+    do not. Otherwise opening a mixed folder rewrites the existing spans."""
+    fs = [core.classify(Path("/s/Show - S01E01-E04 - Title.mkv"))] + files(1)
+    assert core.assign_episodes(fs, {}, episodes_per_file=2) == [(1, 4), (5, 6)]
+
+
+def test_an_anchor_takes_the_folder_wide_span():
+    fs = files(3)
+    assert core.assign_episodes(fs, {fs[1].name: 7}, episodes_per_file=2) \
+        == [(1, 2), (7, 8), (9, 10)]
+
+
+def test_overlapping_spans_are_a_note_not_an_issue():
+    """Consistent with duplicate episode numbers: the timecodes differ, so
+    nothing collides on disk."""
+    fs = [SEASON_DIR / "Show (2026) - S01E01-E02 - 2026-01-01 00 00 00.mp4",
+          SEASON_DIR / "Show (2026) - S01E02-E03 - 2026-01-02 00 00 00.mp4"]
+    plan = core.build_plan(season_dir=SEASON_DIR, entries=fs, show_name="Show",
+                           year="2026", season=1)
+    assert plan.ok
+    assert plan.notes == ["Episode 02 has 2 files"]
+
+
+def test_a_wide_span_on_one_file_notes_nothing():
+    """Midnight Diner's S03E01-E10 is one file covering ten episodes."""
+    fs = [SEASON_DIR / "Show (2026) - S01E01-E10 - x.mp4"]
+    plan = core.build_plan(season_dir=SEASON_DIR, entries=fs, show_name="Show",
+                           year="2026", season=1)
+    assert plan.notes == []
 
 
 def test_an_untouched_episodic_folder_proposes_nothing():

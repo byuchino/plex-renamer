@@ -45,6 +45,8 @@ deliberately preferred over giving a general-purpose renamer write access to `jo
 
 **Target filename:** `<Show Name> (<Year>) - S<nn>E<yy> - <timecode>.<ext>`
 — timecode verbatim from the original name, extension preserved from the original.
+A file holding two episodes gets `S<nn>E<yy>-E<zz>`, which is how Plex reads a
+multi-episode recording.
 
 **Four inputs**, all defaulted from the browsed path:
 
@@ -66,6 +68,37 @@ Real folders are not always uniform: one series pairs every week (16 files, 8 ep
 zero corrections needed), another airs weekly singles for a while before pairing starts.
 An anchor always begins a fresh group, so a change of rhythm costs one pick rather than
 a correction on every row after it.
+
+**Episodes per file.** The inverse case: one recording that holds two consecutive
+episodes, which Plex supports and reads off the filename —
+`Nagatan and Aoto (2026) - S01E01-E02 - 2026-06-22 23 00 00.mp4`. The control widens
+every row into a span and advances the counter by the span, so two double-episode
+recordings are `E01-E02` and `E03-E04` rather than `E01` and `E02`.
+
+The two controls **compose**, and both shapes exist in this library: a double episode
+that is also re-broadcast the next day is four files reading `E01-E02`, `E01-E02`,
+`E03-E04`, `E03-E04` (`Shinsengumi With You I Bloom`). They are deliberately not
+labelled "airings per episode" and "episodes per airing" — the same words reordered,
+where a misreading renames a whole folder the wrong way. A row is a file, so the second
+control is **episodes per file**.
+
+A file that already carries a span keeps its own width, and the run continues *past* it:
+the recording after an existing `S01E01-E02` is E03, not E02. That is the same
+implicit-anchor rule as any numbered file, and without it every row below a double
+episode was off by one. Only the hyphenated `-E02` spelling is recognised. Plex also
+reads `S01E01E02` and `S01E01-02`, but of 9600 files here 58 carry `-E`, none carry the
+bare form, and the four `-02` ones are all in `Star Wars The Clone Wars` — recognising a
+spelling means re-rendering it canonically, which is a rename of a file nobody asked
+about. A span of one always renders plain `S01E01`, never `S01E01-E01`.
+
+Overlapping spans (`E01-E02` beside `E02-E03`) are a **note, never an issue**, on the
+same reasoning as duplicate episode numbers: the timecodes differ, so nothing collides
+on disk.
+
+Per-row spans are **not** built: the folder-wide control covers a whole season shot the
+same way, but a one-off double episode still needs its row edited by hand. The fix, when
+it is wanted, is to make an anchor `(episode, span)` and add a width selector to the
+episode matrix.
 
 **Already-episodic and mixed folders.** A file carrying an `S00E00` marker is
 recognised too, and its episode number comes from its own name. Everything after the
@@ -279,7 +312,8 @@ previous version and go looking for a bug that is not there.
 
 The page browses the configured roots, derives all four inputs from the path (or from
 the files, see above), live re-plans on every edit, groups re-broadcasts via
-airings-per-episode, cascades an episode pick forward, handles episodic and mixed
+airings-per-episode, writes multi-episode files as `S01E01-E02` via episodes-per-file,
+cascades an episode pick forward, handles episodic and mixed
 folders, validates hand-typed names, and executes a confirmed plan behind a dialog that
 lists every pair — writing an undo manifest first, with one-click undo of the run just
 made.
@@ -287,6 +321,10 @@ made.
 `test_app.py`'s `test_no_module_can_mutate_the_filesystem` pins `app.py`, `core.py` and
 `config.py` as containing no mutation at all. `execute.py` is the single exception and is
 deliberately **not** on that list. Do not relax the rule for the others.
+
+**Known gap, deliberately not built:** a per-row episode *span*. `episodes_per_file` is
+folder-wide, so a season where only the opener is a double episode still needs that row
+edited by hand (see above for the shape of the fix).
 
 **Known gap, deliberately not built:** renumbering a *run* of already-episodic files
 (an off-by-one across a whole season) takes one pick per file today, because a pick

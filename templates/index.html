@@ -238,6 +238,13 @@
         <label for="f-per">Airings per episode</label>
         <input type="number" id="f-per" min="1" step="1" value="1">
       </div>
+      <div class="field">
+        <!-- Deliberately not called "episodes per airing": next to "airings
+             per episode" that is the same words reordered, and reading the two
+             backwards renames a whole folder the wrong way. A row is a file. -->
+        <label for="f-epf">Episodes per file</label>
+        <input type="number" id="f-epf" min="1" step="1" value="1">
+      </div>
     </div>
     <div class="checkrow">
       <input type="checkbox" id="f-renamedir">
@@ -495,6 +502,7 @@ function currentPayload() {
     ident_source: document.querySelector('input[name=idsrc]:checked').value,
     season: document.getElementById("f-season").value,
     per_episode: document.getElementById("f-per").value,
+    episodes_per_file: document.getElementById("f-epf").value,
     rename_show_dir: document.getElementById("f-renamedir").checked,
     anchors: state.anchors,
     name_overrides: state.overrides,
@@ -517,6 +525,15 @@ async function plan(payload) {
 
 const replan = debounce(function () { plan(currentPayload()); }, 250);
 
+// "01", or "01-02" for a file holding two episodes. The button opens the
+// matrix on the FIRST episode; the span comes from the folder-wide input, not
+// from this pick.
+function epLabel(f) {
+  const start = String(f.episode).padStart(2, "0");
+  if (!f.episode_end || f.episode_end <= f.episode) return start;
+  return start + "-" + String(f.episode_end).padStart(2, "0");
+}
+
 function render(data) {
   // Fill the form from the server's own resolution, so first load and every
   // later response agree about what the inputs are.
@@ -525,6 +542,7 @@ function render(data) {
   document.getElementById("f-id").value = data.inputs.ident || "";
   document.getElementById("f-season").value = data.inputs.season;
   document.getElementById("f-per").value = data.inputs.per_episode;
+  document.getElementById("f-epf").value = data.inputs.episodes_per_file;
   document.getElementById("f-renamedir").checked = data.inputs.rename_show_dir;
   const radio = document.querySelector('input[name=idsrc][value="' + data.inputs.ident_source + '"]');
   if (radio) radio.checked = true;
@@ -548,7 +566,7 @@ function render(data) {
     const cls = [edited ? "edited" : "", f.unchanged ? "unchanged" : ""].join(" ").trim();
     return "<tr" + (cls ? ' class="' + cls + '"' : "") + ">" +
       '<td><button class="ep-btn' + (anchored ? " anchored" : "") + '" data-name="' +
-        esc(f.source_name) + '">' + String(f.episode).padStart(2, "0") + "</button></td>" +
+        esc(f.source_name) + '" data-ep="' + f.episode + '">' + epLabel(f) + "</button></td>" +
       '<td><span class="kind ' + esc(f.kind) + '">' + esc(f.kind) + "</span></td>" +
       '<td class="src mono">' + esc(f.source_name) + "</td>" +
       '<td class="arrow">→</td>' +
@@ -563,7 +581,7 @@ function render(data) {
   document.getElementById("rows-empty").style.display = data.files.length ? "none" : "";
 
   tbody.querySelectorAll(".ep-btn").forEach(function (b) {
-    b.onclick = function () { openMatrix(b.dataset.name, parseInt(b.textContent, 10)); };
+    b.onclick = function () { openMatrix(b.dataset.name, parseInt(b.dataset.ep, 10)); };
   });
   tbody.querySelectorAll("td.tgt input").forEach(function (inp) {
     inp.oninput = function () {
@@ -883,6 +901,7 @@ async function loadRunDetail(run) {
   if (inp.year) bits.push("year " + inp.year);
   if (inp.season !== undefined && inp.season !== null) bits.push("season " + inp.season);
   if (inp.per_episode && inp.per_episode > 1) bits.push(inp.per_episode + " airings/episode");
+  if (inp.episodes_per_file && inp.episodes_per_file > 1) bits.push(inp.episodes_per_file + " episodes/file");
   if (inp.rename_show_dir) bits.push("show folder renamed");
 
   box.innerHTML =
@@ -905,7 +924,7 @@ async function loadRunDetail(run) {
 
 // ── Wiring ─────────────────────────────────────────────────────────────────
 
-["f-show", "f-year", "f-id", "f-season", "f-per"].forEach(function (id) {
+["f-show", "f-year", "f-id", "f-season", "f-per", "f-epf"].forEach(function (id) {
   document.getElementById(id).oninput = replan;
 });
 document.querySelectorAll('input[name=idsrc]').forEach(function (r) { r.onchange = replan; });

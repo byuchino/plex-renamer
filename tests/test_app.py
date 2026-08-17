@@ -100,6 +100,7 @@ def test_plan_with_only_a_path_derives_every_default(client, library):
         "ident": "428763",
         "ident_source": "tvdb",            # follows what the folder carries
         "per_episode": 1,
+        "episodes_per_file": 1,
         "rename_show_dir": False,
     }
     assert data["season_dir_was_year"] is True
@@ -158,6 +159,32 @@ def test_per_episode_pairs_each_episode_with_its_rebroadcast(client, library):
     # Two files on one episode is normal here, and must never block the plan.
     assert data["ok"] is True
     assert data["notes"] == ["Episode 01 has 2 files", "Episode 02 has 2 files"]
+
+
+def test_episodes_per_file_reaches_the_target_names(client, library):
+    _, season = library
+    _, data = get_plan(client, path=str(season), episodes_per_file=2)
+    assert [(f["episode"], f["episode_end"]) for f in data["files"]] == \
+        [(1, 2), (3, 4), (5, 6), (7, 8)]
+    assert data["files"][0]["target_name"] == \
+        "Nagatan and Aoto (2026) - S01E01-E02 - 2026-06-22 23 00 00.mp4"
+    assert data["ok"] is True
+    assert data["notes"] == []
+
+
+def test_episodes_per_file_composes_with_per_episode(client, library):
+    _, season = library
+    _, data = get_plan(client, path=str(season), per_episode=2, episodes_per_file=2)
+    assert [(f["episode"], f["episode_end"]) for f in data["files"]] == \
+        [(1, 2), (1, 2), (3, 4), (3, 4)]
+    assert data["ok"] is True
+
+
+def test_episodes_per_file_must_be_a_number(client, library):
+    _, season = library
+    code, data = get_plan(client, path=str(season), episodes_per_file="two")
+    assert code == 400
+    assert "whole numbers" in data["error"]
 
 
 def test_anchor_cascades_forward_only(client, library):
@@ -331,6 +358,41 @@ def test_execute_carries_the_form_inputs_through(client, library):
         "Nagatan and Aoto (2026) - S04E01 - {}.mp4".format(TIMECODES[0]),
         "Nagatan and Aoto (2026) - S04E01 - {}.mp4".format(TIMECODES[1]),
     ]
+
+
+def test_execute_writes_multi_episode_names_and_undoes_them(client, library):
+    _, season = library
+    before = sorted(p.name for p in season.iterdir())
+    _, plan = get_plan(client, path=str(season), episodes_per_file=2)
+    code, data = execute_run(client, path=str(season), episodes_per_file=2,
+                             fingerprint=plan["fingerprint"])
+    assert code == 200, data
+    dest = season.parent / "Season 01"
+    assert sorted(p.name for p in dest.iterdir()) == [
+        "Nagatan and Aoto (2026) - S01E01-E02 - {}.mp4".format(TIMECODES[0]),
+        "Nagatan and Aoto (2026) - S01E03-E04 - {}.mp4".format(TIMECODES[1]),
+        "Nagatan and Aoto (2026) - S01E05-E06 - {}.mp4".format(TIMECODES[2]),
+        "Nagatan and Aoto (2026) - S01E07-E08 - {}.mp4".format(TIMECODES[3]),
+    ]
+
+    undo = client.post("/api/undo", json={"manifest": data["manifest"]}).get_json()
+    assert undo["ok"] is True, undo
+    assert sorted(p.name for p in season.iterdir()) == before
+
+
+def test_replanning_a_multi_episode_folder_proposes_nothing(client, library):
+    """The round trip that matters: after a span run, reopening the destination
+    must be a no-op rather than renumbering E01-E02 into E01."""
+    _, season = library
+    _, plan = get_plan(client, path=str(season), episodes_per_file=2)
+    execute_run(client, path=str(season), episodes_per_file=2,
+                fingerprint=plan["fingerprint"])
+
+    dest = season.parent / "Season 01"
+    _, again = get_plan(client, path=str(dest))
+    assert again["move_count"] == 0
+    assert [(f["episode"], f["episode_end"]) for f in again["files"]] == \
+        [(1, 2), (3, 4), (5, 6), (7, 8)]
 
 
 def test_execute_outside_the_roots_is_refused(client, tmp_path):

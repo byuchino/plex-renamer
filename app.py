@@ -153,8 +153,10 @@ def _plan_from_payload(cfg: Config,
     try:
         season = int(payload["season"]) if "season" in payload else defaults.season
         per_episode = int(payload.get("per_episode", 1))
+        episodes_per_file = int(payload.get("episodes_per_file", 1))
     except (TypeError, ValueError):
-        raise BadRequest("season and per_episode must be whole numbers")
+        raise BadRequest(
+            "season, per_episode and episodes_per_file must be whole numbers")
 
     anchors: Dict[str, int] = {}
     for name, value in (payload.get("anchors") or {}).items():
@@ -177,6 +179,7 @@ def _plan_from_payload(cfg: Config,
         ident_source=ident_source,
         anchors=anchors,
         per_episode=per_episode,
+        episodes_per_file=episodes_per_file,
         rename_show_dir=bool(payload.get("rename_show_dir")),
         name_overrides=overrides,
     )
@@ -188,6 +191,7 @@ def _plan_from_payload(cfg: Config,
         "ident": ident,
         "ident_source": ident_source,
         "per_episode": per_episode,
+        "episodes_per_file": episodes_per_file,
         "rename_show_dir": bool(payload.get("rename_show_dir")),
     }
     return season_dir, defaults, inputs, plan
@@ -225,6 +229,7 @@ def _plan_response(cfg: Config, payload: Dict[str, Any]):
                 "source_name": f.source.name,
                 "kind": f.kind,
                 "episode": f.episode,
+                "episode_end": f.episode_end,
                 "target_name": f.target_name,
                 "unchanged": f.unchanged,
                 "issues": f.issues,

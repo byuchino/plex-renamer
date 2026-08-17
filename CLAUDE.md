@@ -9,8 +9,10 @@ the operational facts that are not derivable from the code.
 ## Status
 
 Phases 1 through 4 are complete: **installed as `plex-renamer.service` on the VM and able
-to move real files.** 208 tests. `main` is pushed and the deployed code in
-`/opt/plex-renamer` matches `HEAD` byte for byte (checked by md5).
+to move real files.** 233 tests.
+
+Multi-episode support (`episodes_per_file`, see below) is deployed. `/opt/plex-renamer`
+matches `HEAD` byte for byte (checked by md5). **`main` is not pushed** as of this commit.
 
 **Resume here — nothing is half-finished; these are choices, not chores:**
 
@@ -22,7 +24,11 @@ to move real files.** 208 tests. `main` is pushed and the deployed code in
 2. **A decision only the user can make:** `Star Wars The Clone Wars` holds two complete
    copies of every season (see below). 125 renames whichever naming is chosen. It is a
    "which copy do you keep" call, not something this tool can settle.
-3. **Nothing else is outstanding.** Watched state is settled (see below, do not re-open).
+3. **A follow-up, if it is ever wanted:** per-row episode spans. `episodes_per_file` is
+   folder-wide, so a season where only the opener is a double episode still needs that
+   row hand-edited. The fix is to make an anchor `(episode, span)` instead of an `int`
+   and add a width selector to the episode matrix.
+4. **Nothing else is outstanding.** Watched state is settled (see below, do not re-open).
    No known bugs. The real-library sweep sits at 56 of 599 folders proposing changes, and
    the ones that do are either genuine fixes or the Clone Wars duplicate above.
 
@@ -45,6 +51,30 @@ deliberately absent from that list — do not add the others to it.
 - A manifest that cannot be written refuses the whole run. No undo record, no moves.
 - Settled: an emptied `Season YYYY` **is** removed, but only that form — an emptied
   `Season 1` stays. Anything left in the folder (a poster, a skipped file) keeps it.
+
+## Multi-episode files (`episodes_per_file`, added 2026-08-17)
+
+One recording holding two consecutive episodes, written `S01E01-E02` — Plex reads the
+span off the filename. See README for the full rules. The facts worth not rediscovering:
+
+- **Only the hyphenated `-E02` spelling is parsed.** Of 9600 files in the library, 58
+  carry `-E`, **none** carry the bare `S01E01E02`, and the four `S01E01-02` are all in
+  `Star Wars The Clone Wars` (the duplicate-media folder). Recognising a spelling means
+  re-rendering it canonically, i.e. renaming files nobody asked about — so the other two
+  forms stay in the byte-preserved tail and keep round-tripping. Don't "improve" this.
+- **`RE_EPISODIC` had to learn spans regardless of the new input.** Before, `S01E01-E02`
+  parsed as episode 1 with `-E02` swallowed into the tail. It round-tripped byte-identical
+  *by accident*, but the implicit-anchor cascade read it as E01, so every row below a
+  double episode was off by one. That was a live bug, not a new feature.
+- **A malformed span (`S01E05-E02`) is handed back to the tail**, not corrected.
+- **The two controls compose and both shapes are real.** `Shinsengumi With You I Bloom`
+  is a double episode re-broadcast the next day: 2 airings/episode × 2 episodes/file.
+- **The sweep came back byte-identical against `HEAD`** over all 599 folders. It is inert
+  on the existing library because every folder holding a span holds *only* episodic files,
+  which are their own anchors — the span only changes what a following timecode run gets.
+- The UI label is **"Episodes per file"**, deliberately not "episodes per airing": beside
+  "Airings per episode" that is the same words reordered, and reading the two backwards
+  renames a whole folder the wrong way.
 
 ## History and logging
 
@@ -91,7 +121,7 @@ One pre-existing naming misfire is **fixed**; one remains. Neither was caught by
 
 | | |
 |---|---|
-| Tests | `.venv/bin/python -m pytest tests -q` (207 passing) |
+| Tests | `.venv/bin/python -m pytest tests -q` (233 passing) |
 | Push | `GIT_SSH_COMMAND='ssh -F ~/.ssh/config' git push` — remote uses the **`github-byuchino`** alias; `byuchino` is not this machine's default GitHub account |
 | VM | `ssh handbrake-vm` (`brian@192.168.254.206`), **Python 3.8.10** |
 | Roots | `/mnt/bama/volume1/TV Shows`, `/mnt/bama/volume1/Videos/KIKU` — both on the home NAS |
@@ -159,11 +189,13 @@ episode will probably cost its watched flag; that is a known price.
   entire library". Three rules exist because of it, all in README: tails preserved
   byte-for-byte, show name/year defaulting from the files, and leaving a correctly-
   numbered season folder alone.
-- **The sweep is stronger run over both roots and diffed against `HEAD`.** All 599 season
-  folders: 473 no-op, 45 with no renameable files, 81 proposing changes. The absolute
-  numbers are not the check — a byte-identical diff against the pre-change code is. A
-  sweep script (30 lines, drives `/api/plan` through the Flask test client) is quick to
-  rewrite; run it on the VM in `/tmp`, since the NAS roots are not mounted locally.
+- **The sweep is stronger run over both roots and diffed against `HEAD`.** The script now
+  lives in the repo as `deploy/sweep.py` — copy the repo *and* a `git archive HEAD` export
+  to `/tmp` on the VM, run both, `diff`. Needs `PYTHONPATH=.` and
+  `/opt/plex-renamer/venv/bin/python`; the NAS roots are not mounted locally. Current
+  baseline over all 603 season folders: **498 no-op, 56 proposing changes (1106 files),
+  49 with no renameable files.** The absolute numbers are not the check — a byte-identical
+  diff against the pre-change code is.
 - **`os.access` is unusable on these NFS mounts — never permission-check with it.**
   DSM's NFSv4.1 export answers `access(2)` itself, and reports `W_OK` **false** for a
   directory that is mode 777, owned by the asking uid, and which `open(...,"w")` succeeds

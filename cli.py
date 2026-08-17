@@ -48,6 +48,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--per-episode", type=int, default=1, metavar="N",
                    help="how many consecutive recordings share one episode number "
                         "(2 for a series that is re-broadcast the next day)")
+    p.add_argument("--episodes-per-file", type=int, default=1, metavar="N",
+                   help="how many consecutive episodes one recording holds "
+                        "(2 renders S01E01-E02); composes with --per-episode")
     p.add_argument("--rename-show-dir", action="store_true",
                    help="also propose renaming the show folder from show/year/id")
     return p
@@ -93,6 +96,7 @@ def main(argv=None) -> int:
         ident_source=ident_source,
         anchors=parse_episode_anchors(args.episode),
         per_episode=args.per_episode,
+        episodes_per_file=args.episodes_per_file,
         rename_show_dir=args.rename_show_dir,
     )
 

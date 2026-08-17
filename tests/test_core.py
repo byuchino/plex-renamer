@@ -312,7 +312,59 @@ def test_existing_target_detected(tmp_path):
     ("Renamed.mkv", ["Extension must stay .mp4."]),
 ])
 def test_check_override(typed, expected):
-    assert core.check_override(typed, ".mp4") == expected
+    assert core.check_override(typed, ".mp4")[0] == expected
+
+
+# ── The tail check: advisory, because retitling is legitimate ──────────────
+
+TAIL = " - 2026-06-22 23 00 00"
+
+
+def test_a_typed_name_that_keeps_the_tail_is_silent():
+    issues, warns = core.check_override(
+        "Show (2026) - S01E01" + TAIL + ".mp4", ".mp4", TAIL)
+    assert (issues, warns) == ([], [])
+
+
+def test_a_mistyped_tail_is_warned_about():
+    """The whole point: this is the one place a byte-preserved string gets
+    retyped, and every other check here accepts a wrong digit."""
+    _, warns = core.check_override(
+        "Show (2026) - S01E01 - 2026-06-22 23 00 01.mp4", ".mp4", TAIL)
+    assert len(warns) == 1
+    assert "2026-06-22 23 00 00" in warns[0]
+
+
+def test_dropping_the_tail_warns_but_never_blocks():
+    """Retitling is a real thing to want — the library already contains
+    'S01E01 - Ambush'. So this must not be an error."""
+    issues, warns = core.check_override(
+        "Show (2026) - S01E01 - Ambush.mp4", ".mp4", TAIL)
+    assert issues == []
+    assert warns != []
+
+
+def test_a_rejected_name_is_not_also_warned_about():
+    """The derived name is used when the typed one is unusable, so a note about
+    the typed text would describe something that will not be applied."""
+    issues, warns = core.check_override("Renamed.mkv", ".mp4", TAIL)
+    assert issues == ["Extension must stay .mp4."]
+    assert warns == []
+
+
+def test_a_file_with_no_tail_is_never_warned_about():
+    issues, warns = core.check_override("Show - S01E01.mp4", ".mp4", "")
+    assert (issues, warns) == ([], [])
+
+
+def test_a_tail_warning_reaches_the_row_without_blocking_the_plan():
+    plan = a_plan(name_overrides={
+        "Nagatan and Aoto (2026) - 2026-06-22 23 00 00.mp4":
+            "Nagatan and Aoto (2026) - S01E01 - 2026-06-22 23 00 09.mp4"})
+    assert plan.ok is True                 # advisory never blocks
+    assert plan.files[0].issues == []
+    assert len(plan.files[0].warnings) == 1
+    assert plan.files[1].warnings == []    # untouched rows stay quiet
 
 
 FIRST = "Nagatan and Aoto (2026) - 2026-06-22 23 00 00.mp4"

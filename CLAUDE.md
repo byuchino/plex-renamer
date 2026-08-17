@@ -30,7 +30,15 @@ the tool's primary case.
 3. **A follow-up, if it is ever wanted:** per-row episode spans. `episodes_per_file` is
    folder-wide, so a season where only the opener is a double episode still needs that
    row hand-edited. The fix is to make an anchor `(episode, span)` instead of an `int`
-   and add a width selector to the episode matrix.
+   and add a width selector to the episode matrix. **Deferred on purpose (2026-08-17):**
+   the shape does not exist in the library today — the sweep shows the span logic is inert,
+   because every folder holding a span holds *only* episodic files, which carry their own.
+   The workaround is two actions (anchor the next row, hand-type this one), and the only
+   real risk in it — a silently mistyped tail — is now covered by the advisory tail check
+   below. Build it when the shape actually turns up, and design the width selector against
+   a real folder rather than a guess: adding a third episode-shaped control beside
+   "Episodes per file" and "Airings per episode" is exactly the confusion those two
+   already nearly caused.
 4. **Nothing else is outstanding.** Watched state is settled (see below, do not re-open).
    No known bugs. The real-library sweep sits at 56 of 599 folders proposing changes, and
    the ones that do are either genuine fixes or the Clone Wars duplicate above.
@@ -122,6 +130,24 @@ defaulted off. Facts worth not rediscovering:
   dialog exists to pin.
 - **The sweep came back byte-identical** against `HEAD` over all 603 season folders
   (499 no-op, 55 proposing changes, 49 with no renameable files). Inert unless opted into.
+
+## The advisory tail check (added 2026-08-17)
+
+`check_override` returns `(issues, warnings)`. The warning fires when a hand-typed name
+does not contain the source's `tail_raw`.
+
+- **Advisory, not blocking, and that is the whole design.** Retitling is legitimate —
+  `S01E01 - Ambush` exists in this library — so dropping the tail cannot be an error. The
+  thing being fixed is *silence*, not the edit.
+- **Why it exists at all:** an edited row is the only place in the tool where a
+  byte-preserved string gets retyped. Every other check (`empty`, separator, `.`/`..`,
+  extension) accepts a wrong digit in a timecode without comment.
+- **`PlannedFile.warnings` is deliberately absent from `Plan.ok`.** If a warning ever
+  starts blocking a run, that is the bug — not the warning being too quiet.
+- **Suppressed when the name is rejected outright**, because the derived name is used in
+  that case and the observation would describe text that will not be applied.
+- Rendered amber (`.row-warn`), distinct from red `.row-issue`: a row that looks blocked
+  but is not is worse than no warning at all.
 
 ## History and logging
 

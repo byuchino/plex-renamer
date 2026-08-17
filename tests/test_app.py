@@ -841,3 +841,24 @@ def test_a_season_rename_runs_end_to_end(client, library):
     assert not season.exists()
     assert (dest / "poster.jpg").is_file()
     assert body["season_dir"] == str(dest)
+
+
+# ── Advisory tail check on hand-typed names ────────────────────────────────
+
+def test_a_mistyped_tail_reaches_the_row_as_a_warning_not_an_issue(client, library):
+    _, season = library
+    first = "Nagatan and Aoto (2026) - {}.mp4".format(TIMECODES[0])
+    _, data = get_plan(client, path=str(season), name_overrides={
+        first: "Nagatan and Aoto (2026) - S01E01 - 2026-06-22 23 00 09.mp4"})
+    row = data["files"][0]
+    assert row["issues"] == []
+    assert len(row["warnings"]) == 1
+    assert "2026-06-22 23 00 00" in row["warnings"][0]
+    # Advisory: the plan is still runnable, which is the difference that matters.
+    assert data["ok"] is True
+
+
+def test_an_untouched_row_carries_no_warning(client, library):
+    _, season = library
+    _, data = get_plan(client, path=str(season))
+    assert all(f["warnings"] == [] for f in data["files"])

@@ -289,6 +289,9 @@ class PlannedFile:
     target: Path
     kind: str = TIMECODE
     issues: List[str] = field(default_factory=list)
+    # Advisory, per row. Deliberately absent from Plan.ok: a warning is shown
+    # and the run still goes ahead, which is what separates it from an issue.
+    warnings: List[str] = field(default_factory=list)
     # Inclusive last episode. Equal to `episode` for a single-episode file, so
     # everything downstream can treat a row as a range without special-casing.
     episode_end: Optional[int] = None
@@ -495,20 +498,33 @@ def assign_episodes(files: Sequence[SourceFile], anchors: Dict[str, int],
     return out
 
 
-def check_override(name: str, original_suffix: str) -> List[str]:
-    """What is wrong with a hand-typed filename, if anything.
+def check_override(name: str, original_suffix: str,
+                   source_tail: str = "") -> Tuple[List[str], List[str]]:
+    """What is wrong with a hand-typed filename: (blocking, advisory).
 
     The page lets a row's proposed name be edited directly, so these strings
     arrive from a browser and are used to build a destination path. A name
     containing a separator would silently write outside the season folder,
     which is the one thing root confinement cannot catch — the path would be
     built from a trusted parent and an untrusted leaf.
+
+    The tail check is advisory, not blocking, and that is deliberate. Every
+    derived name keeps the source tail byte-for-byte, and a hand-typed name is
+    the ONLY place in the tool where someone retypes those bytes — a mistyped
+    timecode in an otherwise well-formed name is accepted by every other check
+    here and lands on disk silently. But retitling is legitimate (Plex reads
+    'S01E01 - Ambush' and the library already contains that form), so dropping
+    the tail cannot be an error. Saying so out loud is the whole fix.
+
+    Advisory findings are suppressed when the name is rejected outright: the
+    derived name is used in that case, so an observation about the typed text
+    would be describing something that is not going to be applied.
     """
     issues: List[str] = []
     stripped = name.strip()
     if not stripped:
         issues.append("Name is empty.")
-        return issues
+        return issues, []
     if "/" in name or "\\" in name or "\0" in name:
         issues.append("Name cannot contain a path separator.")
     if stripped in (".", ".."):
@@ -517,7 +533,15 @@ def check_override(name: str, original_suffix: str) -> List[str]:
         # Changing .mp4 to .mkv renames the container without converting it,
         # leaving a file that lies about its own format to Plex.
         issues.append("Extension must stay {}.".format(original_suffix))
-    return issues
+    if issues:
+        return issues, []
+
+    warnings: List[str] = []
+    if source_tail and source_tail not in stripped:
+        warnings.append(
+            "Does not keep the original '{}' — check for a typo.".format(
+                source_tail.strip()))
+    return issues, warnings
 
 
 def build_plan(season_dir: Path,
@@ -588,9 +612,11 @@ def build_plan(season_dir: Path,
         name = build_target_name(show_name, year, season, episode, f.tail_raw,
                                  path.suffix, episode_end)
         override_issues: List[str] = []
+        override_warnings: List[str] = []
         if path.name in overrides:
             typed = overrides[path.name]
-            override_issues = check_override(typed, path.suffix)
+            override_issues, override_warnings = check_override(
+                typed, path.suffix, f.tail_raw)
             # Keep the derived name when the typed one is unusable, so the row
             # still shows a sane target next to the reason it was rejected.
             if not override_issues:
@@ -598,6 +624,7 @@ def build_plan(season_dir: Path,
         pf = PlannedFile(source=path, episode=episode, target=dest_dir / name,
                          kind=f.kind, episode_end=episode_end)
         pf.issues.extend(override_issues)
+        pf.warnings.extend(override_warnings)
         if episode < 1:
             pf.issues.append("Episode must be 1 or greater.")
         plan.files.append(pf)

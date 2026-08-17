@@ -87,6 +87,8 @@
   .ep-btn:hover { border-color: var(--accent); }
   .ep-btn.anchored { background: rgba(245,158,11,.15); color: var(--warn); }
   .row-issue { color: var(--bad); font-size: 12px; }
+  /* Amber, not red: the row is fine and the run will proceed. */
+  .row-warn { color: var(--warn); font-size: 12px; }
   tr.edited td.tgt input { border-color: var(--warn); }
   tr.unchanged td.src, tr.unchanged td.tgt input { opacity: .55; }
   tr.unchanged td.arrow { visibility: hidden; }
@@ -623,6 +625,11 @@ function render(data) {
         (edited ? '<button class="clear-edit" data-clear="' + esc(f.source_name) +
                   '" title="Undo this edit">&times;</button>' : "") +
         f.issues.map(function (i) { return '<div class="row-issue">' + esc(i) + "</div>"; }).join("") +
+        // Advisory: styled apart from an issue because the run still goes
+        // ahead. A row that looks blocked but is not is worse than no warning.
+        (f.warnings || []).map(function (w) {
+          return '<div class="row-warn">' + esc(w) + "</div>";
+        }).join("") +
       "</td></tr>";
   }).join("");
 

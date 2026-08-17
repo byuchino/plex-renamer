@@ -170,6 +170,16 @@ Defaulted **off**: it changes where unrenamed files end up, which should not hap
 unasked. The general move-don't-rename rule above is unchanged — this is a narrow
 opt-in beside it, not a replacement.
 
+**A hand-typed name that drops the source tail is warned about, never blocked.** Every
+derived name keeps the tail byte-for-byte, so an edited row is the only place in the tool
+where someone retypes those bytes — and a mistyped digit in an otherwise well-formed name
+passes every other check and lands on disk silently. Retitling is legitimate, though
+(`S01E01 - Ambush` is a form the library already contains), so this is advisory: the row
+shows it in amber, `plan.ok` is unaffected, and the run proceeds. Suppressed when the name
+is rejected outright, since the derived name is used in that case. This is the cheap half
+of per-row episode spans — it removes the silent-typo risk from the workaround (anchor the
+next row, hand-type this one) without adding a second dimension to the episode matrix.
+
 **Show folder rename is opt-in** via checkbox. When ticked the folder becomes
 `<Show Name> (<Year>) {id}` from all three inputs. Opt-in specifically so a typo in
 Show Name cannot silently rename a directory containing other seasons not visible on

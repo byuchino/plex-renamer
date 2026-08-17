@@ -277,6 +277,7 @@ def _plan_response(cfg: Config, payload: Dict[str, Any]):
                 "target_name": f.target_name,
                 "unchanged": f.unchanged,
                 "issues": f.issues,
+                "warnings": f.warnings,
             }
             for f in plan.files
         ],
